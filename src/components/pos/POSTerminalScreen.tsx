@@ -1,270 +1,1009 @@
 'use client';
-import { useState, useCallback } from 'react';
-import { IconSearch, IconScan, IconTrash, IconPlus, IconMinus, IconCreditCard, IconDollar, IconPrinter, IconCheck, IconX } from '@/components/ui/Icons';
+import { useState, useMemo } from 'react';
+import toast from 'react-hot-toast';
+import {
+  IconSearch, IconScan, IconTrash, IconPlus, IconMinus,
+  IconPrinter, IconCheck, IconX, IconInfo, IconUser, IconChevronDown,
+  IconXCircle, IconRefresh, IconCreditCard,
+} from '@/components/ui/Icons';
+import { SidePanel } from '@/components/ui/SidePanel';
+import { ProductInfoPanel } from './ProductInfoPanel';
+import { AddCustomerModal } from './AddCustomerModal';
+import { StaffSelectionModal } from './StaffSelectionModal';
+import { ReceiptModal } from './ReceiptModal';
+import {
+  Product, CartItem, Customer, getBranchInventory, SplitPayment, PaymentMethod, BANKS, POS_MACHINES, BankType, POSMachineType
+} from './types';
+import { Staff } from '@/components/staff/types';
+import {
+  useProducts, useCategories, useCustomers, useCreateCustomer, useStaff, useCreateOrder, useBranches,
+  useStore,
+  getProductCategoryId, getProductCategoryName,
+} from '@/lib/hooks';
 
-interface Product { id:number; name:string; sku:string; price:number; category:string; emoji:string; }
-interface CartItem extends Product { qty:number; }
+type PayView = 'methods' | 'cash' | 'transfer' | 'pos' | 'split' | 'success';
 
-const PRODUCTS: Product[] = [
-  {id:1,name:'Wireless Earbuds Pro',sku:'WEP-001',price:49.99,category:'Electronics',emoji:'🎧'},
-  {id:2,name:'USB-C Hub 7-in-1',sku:'HUB-019',price:44.99,category:'Electronics',emoji:'🔌'},
-  {id:3,name:'Phone Case Premium',sku:'CAS-072',price:19.99,category:'Cases',emoji:'📱'},
-  {id:4,name:'Wireless Charger Pad',sku:'CHR-044',price:29.99,category:'Electronics',emoji:'⚡'},
-  {id:5,name:'Laptop Stand Pro',sku:'STD-012',price:59.99,category:'Accessories',emoji:'💻'},
-  {id:6,name:'USB-C Cable 2m',sku:'CBL-088',price:14.99,category:'Cables',emoji:'🔗'},
-  {id:7,name:'Screen Protector',sku:'SCR-031',price:9.99,category:'Cases',emoji:'🛡️'},
-  {id:8,name:'Bluetooth Speaker',sku:'SPK-005',price:79.99,category:'Electronics',emoji:'🔊'},
-  {id:9,name:'Mouse Pad XL',sku:'MPD-007',price:24.99,category:'Accessories',emoji:'🖱️'},
-  {id:10,name:'LED Desk Lamp',sku:'LMP-003',price:39.99,category:'Lighting',emoji:'💡'},
-  {id:11,name:'Cable Organizer',sku:'ORG-015',price:12.99,category:'Accessories',emoji:'📦'},
-  {id:12,name:'HDMI Cable 2m',sku:'HDM-002',price:17.99,category:'Cables',emoji:'🎮'},
-];
-const CATEGORIES = ['All','Electronics','Cases','Accessories','Cables','Lighting'];
-type PayView = 'cart'|'cash'|'card'|'success';
+const tierBadge: Record<string, string> = {
+  platinum: 'bg-violet-500/15 text-violet-400',
+  gold: 'bg-amber-500/15 text-amber-400',
+  silver: 'bg-[var(--input-bg)] text-muted',
+  bronze: 'bg-orange-500/15 text-orange-400',
+};
+
+const methodIcons: Record<string, string> = {
+  cash: '💵',
+  transfer: '🏦',
+  pos: '💳',
+};
+
+const bankLabels: Record<BankType, string> = {
+  gtb: 'GTBank',
+  firstbank: 'FirstBank',
+};
+
+const posLabels: Record<POSMachineType, string> = {
+  gtb_pos: 'GTBank POS',
+  firstbank_pos: 'FirstBank POS',
+};
+
+/** Money is sent with at most 2 decimals to avoid float noise in the schema. */
+const round2 = (value: number) => Math.round(value * 100) / 100;
+
+const ALL_CATEGORIES = 'all';
 
 export function POSTerminalScreen() {
-  const [cart, setCart] = useState<CartItem[]>([
-    {...PRODUCTS[0], qty:1},
-    {...PRODUCTS[1], qty:2},
-  ]);
-  const [search, setSearch]     = useState('');
-  const [activeCat, setActiveCat] = useState('All');
-  const [payView, setPayView]   = useState<PayView>('cart');
-  const [cashInput, setCashInput] = useState('');
+  const { data: products = [], isLoading: isLoadingProducts } = useProducts({ isActive: true });
+  const { data: categories = [], isLoading: isLoadingCategories } = useCategories();
+  const { data: customers = [], isLoading: isLoadingCustomers } = useCustomers();
+  const { data: staffList = [], isLoading: isLoadingStaff } = useStaff({ status: 'active' });
+  const { data: branches = [] } = useBranches();
+  const { data: store } = useStore();
+  const createOrder = useCreateOrder();
+  const createCustomer = useCreateCustomer();
 
-  const filtered = PRODUCTS.filter(p =>
-    (activeCat === 'All' || p.category === activeCat) &&
-    (p.name.toLowerCase().includes(search.toLowerCase()) || p.sku.toLowerCase().includes(search.toLowerCase()))
+  /** Payment methods disabled in Settings are not offered at the till. */
+  const payConfig = store?.settings?.paymentMethods;
+  const cashEnabled = payConfig?.cash ?? true;
+  const transferEnabled = payConfig ? payConfig.transfer.enabled && (payConfig.transfer.gtb || payConfig.transfer.firstbank) : true;
+  const posEnabled = payConfig ? payConfig.pos.enabled && (payConfig.pos.gtb || payConfig.pos.firstbank) : true;
+  const availableMethods = [cashEnabled, transferEnabled, posEnabled].filter(Boolean).length;
+
+  const [cart, setCart] = useState<CartItem[]>([]);
+  const [search, setSearch] = useState('');
+  const [activeCat, setActiveCat] = useState<string>(ALL_CATEGORIES);
+  const [payView, setPayView] = useState<PayView>('methods');
+  const [cashInput, setCashInput] = useState('');
+  const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
+  const [isProductPanelOpen, setIsProductPanelOpen] = useState(false);
+  const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
+  const [isCustomerDropdownOpen, setIsCustomerDropdownOpen] = useState(false);
+  const [customerSearch, setCustomerSearch] = useState('');
+  const [isAddCustomerOpen, setIsAddCustomerOpen] = useState(false);
+  
+  // Transfer/POS selection
+  const [selectedBank, setSelectedBank] = useState<BankType | null>(null);
+  const [selectedPOS, setSelectedPOS] = useState<POSMachineType | null>(null);
+  
+  // Split payment
+  const [splitPayments, setSplitPayments] = useState<SplitPayment[]>([]);
+  const [splitCashInput, setSplitCashInput] = useState('');
+  const [splitPaymentType, setSplitPaymentType] = useState<'cash' | 'transfer' | 'pos'>('cash');
+
+  // Staff & Receipt
+  const [isStaffModalOpen, setIsStaffModalOpen] = useState(false);
+  const [isReceiptModalOpen, setIsReceiptModalOpen] = useState(false);
+  const [selectedStaff, setSelectedStaff] = useState<Staff | null>(null);
+  const [completedSaleData, setCompletedSaleData] = useState<{
+    orderNumber: string;
+    paymentMethod: string;
+    staffName: string;
+  } | null>(null);
+
+  const filtered = products.filter((p: Product) =>
+    (activeCat === ALL_CATEGORIES || getProductCategoryId(p) === activeCat) &&
+    (p.name.toLowerCase().includes(search.toLowerCase()) || p.sku?.toLowerCase().includes(search.toLowerCase()))
   );
 
-  const addItem = useCallback((p: Product) => {
+  const filteredCustomers = customers.filter((c: Customer) =>
+    c.name.toLowerCase().includes(customerSearch.toLowerCase()) ||
+    (c.email?.toLowerCase().includes(customerSearch.toLowerCase())) ||
+    (c.phone?.includes(customerSearch))
+  );
+
+  const isLoading = isLoadingProducts || isLoadingCategories || isLoadingCustomers || isLoadingStaff;
+
+  // No manual useCallback here: React Compiler already memoizes, and the
+  // hand-written dep arrays tripped its "existing memoization" check.
+  const addItem = (p: Product) => {
     setCart(prev => {
       const ex = prev.find(c => c.id === p.id);
-      if (ex) return prev.map(c => c.id === p.id ? {...c, qty:c.qty+1} : c);
-      return [...prev, {...p, qty:1}];
+      return ex ? prev.map(c => c.id === p.id ? { ...c, qty: c.qty + 1 } : c) : [...prev, { ...p, qty: 1 }];
     });
-  }, []);
+  };
 
-  const updateQty = useCallback((id: number, delta: number) => {
-    setCart(prev => prev.map(c => c.id === id ? {...c, qty:Math.max(0,c.qty+delta)} : c).filter(c => c.qty > 0));
-  }, []);
+  const updateQty = (id: string, delta: number) => {
+    setCart(prev => prev.map(c => c.id === id ? { ...c, qty: Math.max(0, c.qty + delta) } : c).filter(c => c.qty > 0));
+  };
 
-  const removeItem = useCallback((id: number) => setCart(prev => prev.filter(c => c.id !== id)), []);
-  const clearCart = () => { setCart([]); setPayView('cart'); setCashInput(''); };
+  const removeItem = (id: string) => setCart(prev => prev.filter(c => c.id !== id));
 
-  const subtotal = cart.reduce((s, c) => s + c.price * c.qty, 0);
-  const tax      = subtotal * 0.0825;
-  const total    = subtotal + tax;
+  const clearCart = () => {
+    setCart([]);
+    setPayView('methods');
+    setCashInput('');
+    setSelectedCustomer(null);
+    setSplitPayments([]);
+    setSelectedBank(null);
+    setSelectedPOS(null);
+    setSplitCashInput('');
+    setSplitPaymentType('cash');
+    setSelectedStaff(null);
+    setCompletedSaleData(null);
+    setIsReceiptModalOpen(false);
+  };
+
+  const subtotal = useMemo(() => cart.reduce((s, c) => s + c.price * c.qty, 0), [cart]);
+  const tax = subtotal * 0.0825;
+  const total = subtotal + tax;
   const totalItems = cart.reduce((s, c) => s + c.qty, 0);
-
   const cashNum = parseFloat(cashInput || '0');
-  const change  = cashNum - total;
+  const change = cashNum - total;
+  
+  const splitTotalPaid = useMemo(() => splitPayments.reduce((sum, p) => sum + p.amount, 0), [splitPayments]);
+  const splitRemaining = total - splitTotalPaid;
 
   const handleNumPad = (val: string) => {
-    if (val === 'DEL') { setCashInput(p => p.slice(0,-1)); return; }
+    if (val === 'DEL') { setCashInput(p => p.slice(0, -1)); return; }
     if (val === '.' && cashInput.includes('.')) return;
-    if (cashInput.length >= 7) return;
+    if (cashInput.length >= 8) return;
     setCashInput(p => p + val);
   };
 
-  const processPayment = () => {
-    setPayView('success');
-    setTimeout(() => { clearCart(); setPayView('cart'); }, 2600);
+  const handleSplitNumPad = (val: string) => {
+    if (val === 'DEL') { setSplitCashInput(p => p.slice(0, -1)); return; }
+    if (val === '.' && splitCashInput.includes('.')) return;
+    if (splitCashInput.length >= 8) return;
+    setSplitCashInput(p => p + val);
   };
 
+  const processPayment = () => {
+    if (cart.length === 0) {
+      toast.error('Add at least one product before completing a sale');
+      return;
+    }
+    setIsStaffModalOpen(true);
+  };
+
+  /** Human-readable summary of whichever payment mix is active. */
+  const buildPaymentLabel = () => {
+    if (payView === 'cash') return 'Cash';
+    if (payView === 'transfer' && selectedBank) return `Transfer (${bankLabels[selectedBank]})`;
+    if (payView === 'pos' && selectedPOS) return `POS (${posLabels[selectedPOS]})`;
+    if (payView === 'split') {
+      return splitPayments.map(p => {
+        if (p.method === 'cash') return 'Cash';
+        if (p.method === 'transfer' && p.bank) return `Transfer (${bankLabels[p.bank]})`;
+        if (p.method === 'pos' && p.posMachine) return `POS (${posLabels[p.posMachine]})`;
+        return p.method;
+      }).join(' + ');
+    }
+    return 'Cash';
+  };
+
+  const handleStaffSelect = async (staff: Staff) => {
+    setSelectedStaff(staff);
+    setIsStaffModalOpen(false);
+
+    const defaultBranch = branches.find(b => b.isDefault) || branches[0];
+
+    // Round the totals before sending: money stored as 6.0000000001 in Mongo
+    // would fail the schema's min checks downstream and skew reports.
+    const orderSubtotal = round2(subtotal);
+    const orderTax = round2(tax);
+    const orderTotal = round2(total);
+
+    try {
+      const order = await createOrder.mutateAsync({
+        items: cart.map(item => ({
+          productId: item.id,
+          productName: item.name,
+          quantity: item.qty,
+          unitPrice: item.price,
+          totalPrice: round2(item.price * item.qty),
+        })),
+        subtotal: orderSubtotal,
+        tax: orderTax,
+        total: orderTotal,
+        paymentMethod: buildPaymentLabel(),
+        staffId: staff.id,
+        customerId: selectedCustomer?.id,
+        branchId: defaultBranch?.id,
+      });
+
+      setCompletedSaleData({
+        orderNumber: order.orderNumber,
+        paymentMethod: buildPaymentLabel(),
+        staffName: staff.name,
+      });
+
+      setPayView('success');
+      setTimeout(() => {
+        setIsReceiptModalOpen(true);
+      }, 500);
+    } catch {
+      // The interceptor already surfaces the server error; keep the cart intact
+      // so the cashier can retry rather than losing the sale.
+      setPayView('methods');
+    }
+  };
+
+  const handleReceiptClose = () => {
+    setIsReceiptModalOpen(false);
+    clearCart();
+    setPayView('methods');
+  };
+
+  const handleProductInfo = (product: Product) => {
+    setSelectedProduct(product);
+    setIsProductPanelOpen(true);
+  };
+
+  const handleAddToCart = (product: Product) => {
+    addItem(product);
+  };
+
+  const handleSelectCustomer = (customer: Customer) => {
+    setSelectedCustomer(customer);
+    setCustomerSearch('');
+    setIsCustomerDropdownOpen(false);
+  };
+
+  const handleRemoveCustomer = () => {
+    setSelectedCustomer(null);
+  };
+
+  const handleAddCustomer = async (data: { name: string; phone: string; email?: string }) => {
+    // `tier` is server-assigned (always bronze on create), so it is not sent.
+    const created = await createCustomer.mutateAsync({
+      name: data.name,
+      phone: data.phone,
+      email: data.email,
+    });
+    // Link the new customer to the open sale so the order is attributed to them.
+    setSelectedCustomer(created);
+  };
+
+  const goBack = () => {
+    setPayView('methods');
+    setCashInput('');
+    setSelectedBank(null);
+    setSelectedPOS(null);
+    setSplitCashInput('');
+    setSplitPaymentType('cash');
+  };
+
+  const addSplitPayment = (method: PaymentMethod, amount: number, bank?: BankType, posMachine?: POSMachineType) => {
+    const newPayment: SplitPayment = {
+      id: Date.now().toString(),
+      method,
+      amount,
+      bank,
+      posMachine,
+    };
+    setSplitPayments(prev => [...prev, newPayment]);
+    setSplitCashInput('');
+  };
+
+  const removeSplitPayment = (id: string) => {
+    setSplitPayments(prev => prev.filter(p => p.id !== id));
+  };
+
+  const canComplete = useMemo(() => {
+    if (payView === 'cash') return cashNum >= total;
+    if (payView === 'transfer') return selectedBank !== null;
+    if (payView === 'pos') return selectedPOS !== null;
+    if (payView === 'split') return splitRemaining <= 0;
+    return false;
+  }, [payView, cashNum, total, selectedBank, selectedPOS, splitRemaining]);
+
   return (
-    <div style={{ display:'flex', gap:16, height:'calc(100vh - 96px)', minHeight:0 }}>
-      {/* ── Left: catalog ── */}
-      <div style={{ flex:1, display:'flex', flexDirection:'column', gap:10, minWidth:0 }}>
-        <div style={{ display:'flex', gap:10 }}>
-          <div className="pos-search" style={{ flex:1 }}>
-            <IconSearch size={14} />
-            <input className="pos-input" placeholder="Search by name or SKU…" value={search} onChange={e => setSearch(e.target.value)} />
+    <div className="flex gap-4 h-[calc(100vh-96px)] min-h-0">
+      {/* ── Catalog ── */}
+      <div className="flex-1 flex flex-col gap-2.5 min-w-0">
+        <div className="flex gap-2.5">
+          <div className="relative flex-1">
+            <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-subtle pointer-events-none">
+              <IconSearch size={14} />
+            </span>
+            <input
+              className="w-full h-9 pl-8 pr-3 bg-[var(--surface-2)] border border-[var(--border-strong)] rounded-lg text-[var(--text)] text-[13px] placeholder:text-subtle outline-none focus:border-blue-500 focus:shadow-[0_0_0_3px_rgba(59,130,246,0.15)] transition-all"
+              placeholder="Search by name or SKU…"
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+            />
           </div>
-          <button className="pos-btn ghost" style={{ gap:6, flexShrink:0 }}>
+          <button className="flex items-center gap-1.5 h-9 px-3.5 bg-[var(--surface-2)] border border-[var(--border-strong)] text-muted hover:text-[var(--text)] hover:bg-[var(--input-bg)] rounded-lg text-[13px] font-semibold transition-all flex-shrink-0">
             <IconScan size={14} /> Scan
           </button>
         </div>
 
-        <div style={{ display:'flex', gap:6, overflowX:'auto', paddingBottom:2 }}>
-          {CATEGORIES.map(cat => (
-            <button key={cat} className={`pos-chip${activeCat === cat ? ' active' : ''}`} onClick={() => setActiveCat(cat)}>
-              {cat}
+        <div className="flex gap-1.5 overflow-x-auto pb-0.5">
+          <button
+            onClick={() => setActiveCat(ALL_CATEGORIES)}
+            className={`px-3 py-1.5 rounded-lg border text-[11px] font-semibold transition-all whitespace-nowrap ${
+              activeCat === ALL_CATEGORIES
+                ? 'bg-blue-500/15 border-blue-500/30 text-blue-400'
+                : 'bg-[var(--surface-2)] border-[var(--border)] text-subtle hover:border-[var(--border-strong)] hover:text-muted'
+            }`}
+          >
+            All
+          </button>
+          {categories.map(cat => (
+            <button
+              key={cat.id}
+              onClick={() => setActiveCat(cat.id)}
+              className={`px-3 py-1.5 rounded-lg border text-[11px] font-semibold transition-all whitespace-nowrap ${
+                activeCat === cat.id
+                  ? 'bg-blue-500/15 border-blue-500/30 text-blue-400'
+                  : 'bg-[var(--surface-2)] border-[var(--border)] text-subtle hover:border-[var(--border-strong)] hover:text-muted'
+              }`}
+            >
+              {cat.name}
             </button>
           ))}
         </div>
 
-        <div style={{ flex:1, overflowY:'auto', display:'grid', gridTemplateColumns:'repeat(auto-fill,minmax(145px,1fr))', gap:10, alignContent:'start', paddingRight:3 }}>
+        <div className="flex-1 overflow-y-auto grid grid-cols-[repeat(auto-fill,minmax(145px,1fr))] gap-2.5 content-start pr-0.5">
+          {isLoadingProducts && <div className="col-span-full text-center py-10 text-subtle text-xs">Loading products…</div>}
           {filtered.map(p => {
             const inCart = cart.find(c => c.id === p.id);
             return (
-              <button key={p.id} className="pos-product-card" onClick={() => addItem(p)}>
-                {inCart && (
-                  <div style={{ position:'absolute', top:8, right:8, width:19, height:19, borderRadius:'50%', background:'var(--pos-blue)', color:'#fff', fontSize:9, fontWeight:800, display:'flex', alignItems:'center', justifyContent:'center' }}>
-                    {inCart.qty}
-                  </div>
-                )}
-                <div style={{ fontSize:26, marginBottom:7, lineHeight:1 }}>{p.emoji}</div>
-                <div style={{ fontSize:11, fontWeight:700, color:'var(--pos-t1)', marginBottom:3, lineHeight:1.3 }}>{p.name}</div>
-                <div className="pos-mono" style={{ color:'var(--pos-t3)', marginBottom:7 }}>{p.sku}</div>
-                <div style={{ fontSize:15, fontWeight:800, color:'var(--pos-blue)', fontVariantNumeric:'tabular-nums' }}>${p.price.toFixed(2)}</div>
-                <div style={{ fontSize:9, color:'var(--pos-t3)', marginTop:2 }}>{p.category}</div>
-              </button>
+              <div key={p.id} className="relative bg-[var(--surface-2)] border border-[var(--border)] rounded-xl p-3 text-left transition-all hover:border-blue-500 hover:bg-[var(--input-bg)] hover:-translate-y-px">
+                <button
+                  onClick={() => addItem(p)}
+                  className="w-full text-left"
+                >
+                  {inCart && (
+                    <div className="absolute top-2 right-2 w-[19px] h-[19px] rounded-full bg-blue-500 text-white text-[9px] font-extrabold flex items-center justify-center z-10">
+                      {inCart.qty}
+                    </div>
+                  )}
+                  <div className="text-[26px] mb-1.5 leading-none">📦</div>
+                  <div className="text-[11px] font-bold text-[var(--text)] mb-0.5 leading-snug">{p.name}</div>
+                  <div className="font-mono text-[10px] text-subtle mb-1.5">{p.sku}</div>
+                  <div className="text-[15px] font-extrabold text-blue-400 tabular-nums">${p.price.toFixed(2)}</div>
+                  <div className="text-[9px] text-subtle mt-0.5">{getProductCategoryName(p)}</div>
+                </button>
+                <button
+                  onClick={(e) => { e.stopPropagation(); handleProductInfo(p); }}
+                  className="absolute top-2 left-2 w-6 h-6 rounded-md bg-[var(--card)]/80 border border-[var(--border-strong)] text-muted hover:text-blue-400 hover:border-blue-500/30 flex items-center justify-center transition-all opacity-0 hover:opacity-100"
+                  title="View Product Info"
+                >
+                  <IconInfo size={12} />
+                </button>
+              </div>
             );
           })}
-          {!filtered.length && (
-            <div style={{ gridColumn:'1/-1', textAlign:'center', padding:'40px 0', color:'var(--pos-t3)', fontSize:12 }}>No products found</div>
+          {!isLoadingProducts && !filtered.length && (
+            <div className="col-span-full text-center py-10 text-subtle text-xs">No products found</div>
           )}
         </div>
       </div>
 
-      {/* ── Right: cart panel ── */}
-      <div style={{ width:350, display:'flex', flexDirection:'column', background:'var(--pos-s1)', border:'1px solid var(--pos-bd)', borderRadius:14, overflow:'hidden', flexShrink:0 }}>
+      {/* ── Cart panel ── */}
+      <div className="w-[380px] flex flex-col bg-[var(--card)] border border-[var(--border)] rounded-2xl overflow-hidden flex-shrink-0">
         {/* Header */}
-        <div style={{ padding:'13px 14px', borderBottom:'1px solid var(--pos-bd)', display:'flex', alignItems:'center', justifyContent:'space-between', flexShrink:0 }}>
+        <div className="px-3.5 py-3 border-b border-[var(--border)] flex items-center justify-between flex-shrink-0">
           <div>
-            <div style={{ fontWeight:800, fontSize:13, color:'var(--pos-t1)' }}>Current Sale</div>
-            <div style={{ fontSize:10, color:'var(--pos-t3)', marginTop:1 }}>{totalItems} item{totalItems !== 1 ? 's' : ''} in cart</div>
+            <div className="font-extrabold text-[13px] text-[var(--text)]">Current Sale</div>
+            <div className="text-[10px] text-subtle mt-px">{totalItems} item{totalItems !== 1 ? 's' : ''} in cart</div>
           </div>
-          <div style={{ display:'flex', gap:6 }}>
-            {payView !== 'cart' && <button className="pos-btn ghost sm" onClick={() => setPayView('cart')}>← Back</button>}
-            {cart.length > 0 && payView === 'cart' && (
-              <button className="pos-btn danger sm" onClick={clearCart} style={{ gap:4 }}>
+          <div className="flex gap-1.5">
+            {payView !== 'methods' && payView !== 'success' && (
+              <button onClick={goBack} className="h-7 px-2.5 bg-[var(--surface-2)] border border-[var(--border-strong)] text-muted hover:text-[var(--text)] rounded-md text-[11px] font-semibold transition-all">
+                ← Back
+              </button>
+            )}
+            {cart.length > 0 && payView === 'methods' && (
+              <button onClick={clearCart} className="h-7 px-2.5 flex items-center gap-1 bg-red-500/10 border border-red-500/30 text-red-400 hover:bg-red-500 hover:text-white rounded-md text-[11px] font-semibold transition-all">
                 <IconTrash size={11} /> Clear
               </button>
             )}
           </div>
         </div>
-        {/* Customer */}
-        <div style={{ padding:'8px 12px', borderBottom:'1px solid var(--pos-bd)', background:'var(--pos-s2)', flexShrink:0 }}>
-          <input className="pos-input sm" placeholder="Customer name (optional)" style={{ background:'var(--pos-s1)' }} />
+
+        {/* Customer Selection */}
+        <div className="px-3 py-2 border-b border-[var(--border)] bg-[var(--surface-2)] flex-shrink-0">
+          {selectedCustomer ? (
+            <div className="flex items-center gap-2 p-2 bg-[var(--card)] border border-[var(--border-strong)] rounded-lg">
+              <div className="w-7 h-7 rounded-full bg-gradient-to-br from-blue-500 to-violet-500 flex items-center justify-center text-[10px] font-extrabold text-white">
+                {selectedCustomer.name.split(' ').map(n => n[0]).join('')}
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="text-[11px] font-semibold text-[var(--text)] truncate">{selectedCustomer.name}</div>
+                <div className="flex items-center gap-1.5">
+                  <span className={`inline-flex px-1.5 py-0.5 rounded text-[8px] font-bold ${tierBadge[selectedCustomer.tier]}`}>
+                    ★ {selectedCustomer.tier}
+                  </span>
+                </div>
+              </div>
+              <button
+                onClick={handleRemoveCustomer}
+                className="w-5 h-5 rounded flex items-center justify-center text-subtle hover:text-red-400 transition-all"
+              >
+                <IconXCircle size={14} />
+              </button>
+            </div>
+          ) : (
+            <div className="relative">
+              <button
+                onClick={() => setIsCustomerDropdownOpen(!isCustomerDropdownOpen)}
+                className="w-full h-8 px-2.5 bg-[var(--card)] border border-[var(--border-strong)] rounded-lg text-[11px] text-subtle flex items-center justify-between hover:border-[var(--border-strong)] transition-all"
+              >
+                <span className="flex items-center gap-2">
+                  <IconUser size={12} />
+                  Add customer to sale
+                </span>
+                <IconChevronDown size={12} />
+              </button>
+              {isCustomerDropdownOpen && (
+                <div className="absolute top-full left-0 right-0 mt-1 bg-[var(--surface-2)] border border-[var(--border-strong)] rounded-lg shadow-xl z-50 overflow-hidden">
+                  <div className="p-2 border-b border-[var(--border)]">
+                    <input
+                      className="w-full h-8 px-2.5 bg-[var(--card)] border border-[var(--border-strong)] rounded-md text-[11px] text-[var(--text)] placeholder:text-subtle outline-none focus:border-blue-500"
+                      placeholder="Search..."
+                      value={customerSearch}
+                      onChange={e => setCustomerSearch(e.target.value)}
+                      autoFocus
+                    />
+                  </div>
+                  <div className="max-h-48 overflow-y-auto">
+                    <button
+                      onClick={() => { setIsAddCustomerOpen(true); setIsCustomerDropdownOpen(false); }}
+                      className="w-full px-3 py-2 flex items-center gap-2 hover:bg-emerald-500/10 transition-colors text-left border-b border-[var(--border)]"
+                    >
+                      <div className="w-6 h-6 rounded-full bg-emerald-500/15 flex items-center justify-center text-emerald-400">
+                        <IconPlus size={12} />
+                      </div>
+                      <div className="text-[11px] font-semibold text-emerald-400">Add New Customer</div>
+                    </button>
+                    {filteredCustomers.length === 0 ? (
+                      <div className="px-3 py-4 text-center text-[11px] text-subtle">No customers found</div>
+                    ) : (
+                      filteredCustomers.map(customer => (
+                        <button
+                          key={customer.id}
+                          onClick={() => handleSelectCustomer(customer)}
+                          className="w-full px-3 py-2 flex items-center gap-2 hover:bg-[var(--input-bg)] transition-colors text-left"
+                        >
+                          <div className="w-6 h-6 rounded-full bg-gradient-to-br from-blue-500 to-violet-500 flex items-center justify-center text-[9px] font-extrabold text-white flex-shrink-0">
+                            {customer.name.split(' ').map(n => n[0]).join('')}
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="text-[11px] font-semibold text-[var(--text)] truncate">{customer.name}</div>
+                            <div className="text-[9px] text-subtle truncate">{customer.phone}</div>
+                          </div>
+                          <span className={`inline-flex px-1.5 py-0.5 rounded text-[8px] font-bold flex-shrink-0 ${tierBadge[customer.tier]}`}>
+                            ★ {customer.tier}
+                          </span>
+                        </button>
+                      ))
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
-        {/* ── SUCCESS ── */}
+        {/* SUCCESS */}
         {payView === 'success' && (
-          <div style={{ flex:1, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:14, padding:24, textAlign:'center' }}>
-            <div style={{ width:68, height:68, borderRadius:'50%', background:'var(--pos-green-dim)', border:'2px solid var(--pos-green)', display:'flex', alignItems:'center', justifyContent:'center' }}>
-              <IconCheck size={32} style={{ color:'var(--pos-green)' } as React.CSSProperties} />
+          <div className="flex-1 flex flex-col items-center justify-center gap-3.5 p-6 text-center">
+            <div className="w-17 h-17 rounded-full bg-emerald-500/15 border-2 border-emerald-400 flex items-center justify-center text-emerald-400">
+              <IconCheck size={32} />
             </div>
-            <div style={{ fontSize:20, fontWeight:800, color:'var(--pos-green)' }}>Payment Successful!</div>
-            <div style={{ fontSize:30, fontWeight:800, color:'var(--pos-t1)', fontVariantNumeric:'tabular-nums' }}>${total.toFixed(2)}</div>
-          </div>
-        )}
-
-        {/* ── CASH PAY ── */}
-        {payView === 'cash' && (
-          <div style={{ flex:1, display:'flex', flexDirection:'column', padding:14, gap:10, overflowY:'auto' }}>
-            <div style={{ background:'var(--pos-s2)', border:'1px solid var(--pos-bd)', borderRadius:10, padding:12, textAlign:'center' }}>
-              <div style={{ fontSize:10, color:'var(--pos-t3)', marginBottom:3, fontWeight:700, textTransform:'uppercase', letterSpacing:'.06em' }}>Amount Due</div>
-              <div style={{ fontSize:30, fontWeight:800, color:'var(--pos-t1)', fontVariantNumeric:'tabular-nums' }}>${total.toFixed(2)}</div>
-            </div>
-            <div style={{ background:'var(--pos-blue-dim)', border:'1px solid rgba(59,130,246,0.3)', borderRadius:10, padding:11, textAlign:'center' }}>
-              <div style={{ fontSize:10, color:'var(--pos-blue)', marginBottom:3, fontWeight:700, textTransform:'uppercase', letterSpacing:'.06em' }}>Cash Received</div>
-              <div style={{ fontSize:26, fontWeight:800, color:'var(--pos-blue)', fontVariantNumeric:'tabular-nums', minHeight:34 }}>${cashInput || '0'}</div>
-            </div>
-            {cashNum > 0 && (
-              <div style={{ background: change >= 0 ? 'var(--pos-green-dim)' : 'var(--pos-red-dim)', border:`1px solid ${change >= 0 ? 'rgba(16,185,129,0.3)' : 'rgba(239,68,68,0.3)'}`, borderRadius:10, padding:11, textAlign:'center' }}>
-                <div style={{ fontSize:10, color: change >= 0 ? 'var(--pos-green)' : 'var(--pos-red)', marginBottom:3, fontWeight:700, textTransform:'uppercase', letterSpacing:'.06em' }}>
-                  {change >= 0 ? 'Change Due' : 'Insufficient'}
-                </div>
-                <div style={{ fontSize:22, fontWeight:800, color: change >= 0 ? 'var(--pos-green)' : 'var(--pos-red)', fontVariantNumeric:'tabular-nums' }}>${Math.abs(change).toFixed(2)}</div>
+            <div className="text-xl font-extrabold text-emerald-400">Payment Successful!</div>
+            <div className="text-[30px] font-extrabold text-[var(--text)] tabular-nums">${total.toFixed(2)}</div>
+            {completedSaleData?.orderNumber && (
+              <div className="text-[11px] text-subtle">
+                Order <span className="font-mono text-muted">{completedSaleData.orderNumber}</span>
               </div>
             )}
-            <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:6 }}>
-              {['20','50','100'].map(v => (
-                <button key={v} className="pos-btn ghost" style={{ justifyContent:'center' }} onClick={() => setCashInput(v)}>${v}</button>
-              ))}
-            </div>
-            <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:6 }}>
-              {['1','2','3','4','5','6','7','8','9','.','0','DEL'].map(k => (
-                <button key={k} className={`pos-keypad-btn${k === 'DEL' ? ' del' : ''}`} style={{ height:46 }} onClick={() => handleNumPad(k)}>{k}</button>
-              ))}
-            </div>
-            <button className="pos-btn success lg" style={{ width:'100%', justifyContent:'center', gap:8 }} disabled={change < 0 || cashNum === 0} onClick={processPayment}>
-              <IconCheck size={15} /> Complete Sale
-            </button>
-          </div>
-        )}
-
-        {/* ── CARD PAY ── */}
-        {payView === 'card' && (
-          <div style={{ flex:1, display:'flex', flexDirection:'column', padding:14, gap:14 }}>
-            <div style={{ background:'var(--pos-s2)', border:'1px solid var(--pos-bd)', borderRadius:10, padding:14, textAlign:'center' }}>
-              <div style={{ fontSize:10, color:'var(--pos-t3)', marginBottom:4, fontWeight:700, textTransform:'uppercase', letterSpacing:'.06em' }}>Charge to Card</div>
-              <div style={{ fontSize:34, fontWeight:800, color:'var(--pos-t1)', fontVariantNumeric:'tabular-nums' }}>${total.toFixed(2)}</div>
-            </div>
-            <div style={{ flex:1, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:12, background:'var(--pos-s2)', border:'2px dashed var(--pos-bd2)', borderRadius:12, padding:28, textAlign:'center' }}>
-              <div style={{ width:56, height:56, borderRadius:'50%', background:'var(--pos-blue-dim)', display:'flex', alignItems:'center', justifyContent:'center' }}>
-                <IconCreditCard size={24} style={{ color:'var(--pos-blue)' } as React.CSSProperties} />
+            {selectedCustomer && (
+              <div className="text-[12px] text-muted">
+                Purchase recorded for <span className="text-[var(--text)] font-semibold">{selectedCustomer.name}</span>
               </div>
-              <div style={{ fontSize:13, fontWeight:700, color:'var(--pos-t1)' }}>Tap, Insert or Swipe</div>
-              <div style={{ fontSize:11, color:'var(--pos-t3)' }}>Present card to reader to continue</div>
-            </div>
-            <button className="pos-btn success lg" style={{ width:'100%', justifyContent:'center', gap:8 }} onClick={processPayment}>
-              <IconCheck size={15} /> Confirm Payment
-            </button>
+            )}
           </div>
         )}
 
-        {/* ── CART VIEW ── */}
-        {payView === 'cart' && (
+        {/* PAYMENT METHODS */}
+        {payView === 'methods' && (
           <>
-            <div style={{ flex:1, overflowY:'auto', padding:'10px 12px', display:'flex', flexDirection:'column', gap:6 }}>
+            <div className="flex-1 overflow-y-auto p-2.5 flex flex-col gap-1.5">
               {cart.length === 0 && (
-                <div style={{ flex:1, display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', gap:10, color:'var(--pos-t3)', padding:'40px 0', textAlign:'center' }}>
-                  <div style={{ fontSize:36 }}>🛒</div>
-                  <div style={{ fontSize:13, fontWeight:600 }}>Cart is empty</div>
-                  <div style={{ fontSize:11 }}>Tap a product to add it</div>
+                <div className="flex-1 flex flex-col items-center justify-center gap-2.5 text-subtle py-10 text-center">
+                  <div className="text-[36px]">🛒</div>
+                  <div className="text-[13px] font-semibold">Cart is empty</div>
+                  <div className="text-xs">Tap a product to add it</div>
                 </div>
               )}
               {cart.map(item => (
-                <div key={item.id} className="pos-cart-item">
-                  <div style={{ fontSize:20, flexShrink:0 }}>{item.emoji}</div>
-                  <div style={{ flex:1, minWidth:0 }}>
-                    <div style={{ fontSize:12, fontWeight:700, color:'var(--pos-t1)', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{item.name}</div>
-                    <div className="pos-mono" style={{ color:'var(--pos-t3)', marginTop:1 }}>{item.sku} · ${item.price.toFixed(2)} ea</div>
+                <div key={item.id} className="flex items-center gap-2.5 p-2.5 bg-[var(--surface-2)] border border-[var(--border)] hover:border-[var(--border-strong)] rounded-lg transition-all">
+                  <button
+                    onClick={() => handleProductInfo(item)}
+                    className="w-7 h-7 rounded flex items-center justify-center text-subtle hover:text-blue-400 hover:bg-blue-500/10 transition-all flex-shrink-0"
+                    title="View Product Info"
+                  >
+                    <IconInfo size={13} />
+                  </button>
+                  <div className="text-[20px] flex-shrink-0">📦</div>
+                  <div className="flex-1 min-w-0">
+                    <div className="text-xs font-bold text-[var(--text)] truncate">{item.name}</div>
+                    <div className="font-mono text-[10px] text-subtle mt-px">{item.sku} · ${item.price.toFixed(2)} ea</div>
                   </div>
-                  <div style={{ display:'flex', alignItems:'center', gap:5, flexShrink:0 }}>
-                    <button className="pos-qty-btn" onClick={() => updateQty(item.id, -1)}><IconMinus size={10} /></button>
-                    <span style={{ fontSize:13, fontWeight:800, color:'var(--pos-t1)', minWidth:18, textAlign:'center', fontVariantNumeric:'tabular-nums' }}>{item.qty}</span>
-                    <button className="pos-qty-btn" onClick={() => updateQty(item.id, 1)}><IconPlus size={10} /></button>
+                  <div className="flex items-center gap-1.5 flex-shrink-0">
+                    <button onClick={() => updateQty(item.id, -1)} className="w-6 h-6 rounded-md border border-[var(--border-strong)] bg-[var(--input-bg)] text-muted hover:bg-blue-500/15 hover:border-blue-500/30 hover:text-blue-400 flex items-center justify-center transition-all active:scale-90">
+                      <IconMinus size={10} />
+                    </button>
+                    <span className="text-[13px] font-extrabold text-[var(--text)] min-w-[18px] text-center tabular-nums">{item.qty}</span>
+                    <button onClick={() => updateQty(item.id, 1)} className="w-6 h-6 rounded-md border border-[var(--border-strong)] bg-[var(--input-bg)] text-muted hover:bg-blue-500/15 hover:border-blue-500/30 hover:text-blue-400 flex items-center justify-center transition-all active:scale-90">
+                      <IconPlus size={10} />
+                    </button>
                   </div>
-                  <div style={{ fontSize:13, fontWeight:800, color:'var(--pos-t1)', minWidth:50, textAlign:'right', fontVariantNumeric:'tabular-nums' }}>${(item.price * item.qty).toFixed(2)}</div>
-                  <button className="pos-btn ghost icon" style={{ color:'var(--pos-red)', width:22, height:22, flexShrink:0, borderRadius:5, fontSize:14 }} onClick={() => removeItem(item.id)}>
+                  <div className="text-[13px] font-extrabold text-[var(--text)] min-w-[50px] text-right tabular-nums">${(item.price * item.qty).toFixed(2)}</div>
+                  <button onClick={() => removeItem(item.id)} className="w-6 h-6 rounded-md flex items-center justify-center text-subtle hover:text-red-400 transition-all flex-shrink-0">
                     <IconX size={11} />
                   </button>
                 </div>
               ))}
             </div>
 
-            <div style={{ padding:'12px 14px', borderTop:'1px solid var(--pos-bd)', background:'var(--pos-s2)', flexShrink:0 }}>
-              <div style={{ display:'flex', flexDirection:'column', gap:5, marginBottom:12 }}>
-                <div style={{ display:'flex', justifyContent:'space-between', fontSize:12, color:'var(--pos-t2)' }}>
-                  <span>Subtotal</span><span style={{ fontVariantNumeric:'tabular-nums' }}>${subtotal.toFixed(2)}</span>
+            <div className="p-3.5 border-t border-[var(--border)] bg-[var(--surface-2)] flex-shrink-0">
+              <div className="flex flex-col gap-1 mb-3">
+                <div className="flex justify-between text-xs text-muted">
+                  <span>Subtotal</span><span className="tabular-nums">${subtotal.toFixed(2)}</span>
                 </div>
-                <div style={{ display:'flex', justifyContent:'space-between', fontSize:12, color:'var(--pos-t2)' }}>
-                  <span>Tax (8.25%)</span><span style={{ fontVariantNumeric:'tabular-nums' }}>${tax.toFixed(2)}</span>
+                <div className="flex justify-between text-xs text-muted">
+                  <span>Tax (8.25%)</span><span className="tabular-nums">${tax.toFixed(2)}</span>
                 </div>
-                <div style={{ height:1, background:'var(--pos-bd)', margin:'3px 0' }} />
-                <div style={{ display:'flex', justifyContent:'space-between', fontSize:18, fontWeight:800, color:'var(--pos-t1)' }}>
-                  <span>Total</span><span style={{ fontVariantNumeric:'tabular-nums' }}>${total.toFixed(2)}</span>
+                <div className="h-px bg-[var(--input-bg)] my-1" />
+                <div className="flex justify-between text-lg font-extrabold text-[var(--text)]">
+                  <span>Total</span><span className="tabular-nums">${total.toFixed(2)}</span>
                 </div>
+                {selectedCustomer && (
+                  <div className="flex justify-between text-[10px] text-violet-400 mt-1">
+                    <span>Customer linked</span><span>{selectedCustomer.tier} member</span>
+                  </div>
+                )}
               </div>
-              <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:8, marginBottom:8 }}>
-                <button className="pos-btn ghost lg" style={{ justifyContent:'center', gap:6, width:'100%' }} disabled={cart.length === 0} onClick={() => setPayView('cash')}>
-                  <IconDollar size={14} /> Cash
-                </button>
-                <button className="pos-btn primary lg" style={{ justifyContent:'center', gap:6, width:'100%' }} disabled={cart.length === 0} onClick={() => setPayView('card')}>
-                  <IconCreditCard size={14} /> Card
+              
+              <div className="grid grid-cols-2 gap-2 mb-2">
+                {cashEnabled && (
+                  <button
+                    disabled={cart.length === 0}
+                    onClick={() => setPayView('cash')}
+                    className="h-12 flex flex-col items-center justify-center gap-1 bg-[var(--input-bg)] border border-[var(--border-strong)] hover:bg-[var(--input-bg)] hover:border-emerald-500/30 disabled:opacity-40 disabled:cursor-not-allowed rounded-xl transition-all"
+                  >
+                    <span className="text-lg">💵</span>
+                    <span className="text-[10px] font-bold text-muted">Cash</span>
+                  </button>
+                )}
+                {transferEnabled && (
+                  <button
+                    disabled={cart.length === 0}
+                    onClick={() => setPayView('transfer')}
+                    className="h-12 flex flex-col items-center justify-center gap-1 bg-[var(--input-bg)] border border-[var(--border-strong)] hover:bg-[var(--input-bg)] hover:border-blue-500/30 disabled:opacity-40 disabled:cursor-not-allowed rounded-xl transition-all"
+                  >
+                    <span className="text-lg">🏦</span>
+                    <span className="text-[10px] font-bold text-muted">Transfer</span>
+                  </button>
+                )}
+                {posEnabled && (
+                  <button
+                    disabled={cart.length === 0}
+                    onClick={() => setPayView('pos')}
+                    className="h-12 flex flex-col items-center justify-center gap-1 bg-[var(--input-bg)] border border-[var(--border-strong)] hover:bg-[var(--input-bg)] hover:border-amber-500/30 disabled:opacity-40 disabled:cursor-not-allowed rounded-xl transition-all"
+                  >
+                    <span className="text-lg">💳</span>
+                    <span className="text-[10px] font-bold text-muted">POS Machine</span>
+                  </button>
+                )}
+                <button
+                  disabled={cart.length === 0 || availableMethods < 2}
+                  onClick={() => setPayView('split')}
+                  title={availableMethods < 2 ? 'Split payment needs at least two enabled methods' : undefined}
+                  className="h-12 flex flex-col items-center justify-center gap-1 bg-blue-500/10 border border-blue-500/30 hover:bg-blue-500/20 hover:border-blue-500/50 disabled:opacity-40 disabled:cursor-not-allowed rounded-xl transition-all"
+                >
+                    <span className="text-lg"><IconRefresh size={16} className="text-blue-400" /></span>
+                  <span className="text-[10px] font-bold text-blue-400">Split Payment</span>
                 </button>
               </div>
-              <button className="pos-btn ghost" style={{ width:'100%', justifyContent:'center', gap:6, fontSize:11 }} disabled={cart.length === 0}>
+              {availableMethods === 0 && (
+                <div className="mb-2 px-3 py-2 bg-amber-500/10 border border-amber-500/20 rounded-lg text-[11px] text-amber-400">
+                  All payment methods are disabled. Enable at least one in Settings → Payment Methods.
+                </div>
+              )}
+              <button disabled={cart.length === 0} className="w-full h-9 flex items-center justify-center gap-1.5 bg-transparent border border-[var(--border)] text-muted hover:text-[var(--text)] hover:border-[var(--border-strong)] disabled:opacity-40 disabled:cursor-not-allowed rounded-xl text-xs font-semibold transition-all">
                 <IconPrinter size={12} /> Print Receipt
               </button>
             </div>
           </>
         )}
+
+        {/* CASH PAYMENT */}
+        {payView === 'cash' && (
+          <div className="flex-1 flex flex-col p-3.5 gap-2.5 overflow-y-auto">
+            <div className="bg-[var(--surface-2)] border border-[var(--border)] rounded-xl p-3 text-center">
+              <div className="text-[10px] text-subtle font-bold uppercase tracking-widest mb-0.5">Amount Due</div>
+              <div className="text-[30px] font-extrabold text-[var(--text)] tabular-nums">${total.toFixed(2)}</div>
+            </div>
+            <div className="bg-emerald-500/15 border border-emerald-500/30 rounded-xl p-2.5 text-center">
+              <div className="text-[10px] text-emerald-400 font-bold uppercase tracking-widest mb-0.5">Cash Received</div>
+              <div className="text-[26px] font-extrabold text-emerald-400 tabular-nums min-h-[34px]">${cashInput || '0'}</div>
+            </div>
+            {cashNum > 0 && (
+              <div className={`rounded-xl p-2.5 text-center border ${change >= 0 ? 'bg-emerald-500/15 border-emerald-500/30' : 'bg-red-500/15 border-red-500/30'}`}>
+                <div className={`text-[10px] font-bold uppercase tracking-widest mb-0.5 ${change >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                  {change >= 0 ? 'Change Due' : 'Insufficient'}
+                </div>
+                <div className={`text-[22px] font-extrabold tabular-nums ${change >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                  ${Math.abs(change).toFixed(2)}
+                </div>
+              </div>
+            )}
+            <div className="grid grid-cols-3 gap-1.5">
+              {['20', '50', '100'].map(v => (
+                <button key={v} onClick={() => setCashInput(v)} className="h-9 bg-[var(--surface-2)] border border-[var(--border-strong)] text-muted hover:bg-[var(--input-bg)] hover:text-[var(--text)] rounded-lg text-[13px] font-semibold transition-all">
+                  ${v}
+                </button>
+              ))}
+            </div>
+            <div className="grid grid-cols-3 gap-1.5">
+              {['1','2','3','4','5','6','7','8','9','.','0','DEL'].map(k => (
+                <button
+                  key={k}
+                  onClick={() => handleNumPad(k)}
+                  className={`h-11 rounded-xl text-[18px] font-bold transition-all active:scale-90 ${
+                    k === 'DEL'
+                      ? 'bg-red-500/10 border border-red-500/25 text-red-400 text-xs'
+                      : 'bg-[var(--surface-2)] border border-[var(--border)] text-[var(--text)] hover:bg-[var(--input-bg)] hover:border-[var(--border-strong)]'
+                  }`}
+                >
+                  {k}
+                </button>
+              ))}
+            </div>
+            <button
+              disabled={!canComplete}
+              onClick={processPayment}
+              className="w-full h-11 flex items-center justify-center gap-2 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-40 disabled:cursor-not-allowed text-white font-bold rounded-xl text-sm transition-all"
+            >
+              <IconCheck size={15} /> Complete Sale
+            </button>
+          </div>
+        )}
+
+        {/* TRANSFER PAYMENT */}
+        {payView === 'transfer' && (
+          <div className="flex-1 flex flex-col p-3.5 gap-4">
+            <div className="bg-[var(--surface-2)] border border-[var(--border)] rounded-xl p-3 text-center">
+              <div className="text-[10px] text-subtle font-bold uppercase tracking-widest mb-0.5">Amount Due</div>
+              <div className="text-[30px] font-extrabold text-[var(--text)] tabular-nums">${total.toFixed(2)}</div>
+            </div>
+            
+            <div>
+              <div className="text-[10px] font-bold uppercase tracking-widest text-subtle mb-2">Select Bank</div>
+              <div className="grid grid-cols-2 gap-2">
+                {BANKS.filter(b => payConfig?.transfer[b.id] ?? true).map(bank => (
+                  <button
+                    key={bank.id}
+                    onClick={() => setSelectedBank(bank.id)}
+                    className={`h-16 flex flex-col items-center justify-center gap-2 rounded-xl border transition-all ${
+                      selectedBank === bank.id
+                        ? 'bg-blue-500/15 border-blue-500/50 text-blue-400'
+                        : 'bg-[var(--surface-2)] border-[var(--border-strong)] text-muted hover:border-[var(--border-strong)]'
+                    }`}
+                  >
+                    <span className="text-2xl">🏦</span>
+                    <span className="text-[11px] font-bold">{bankLabels[bank.id]}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex-1 flex flex-col items-center justify-center gap-3 bg-[var(--surface-2)] border-2 border-dashed border-[var(--border-strong)] rounded-xl p-4 text-center">
+              <div className="w-14 h-14 rounded-full bg-blue-500/15 flex items-center justify-center text-blue-400">
+                <IconRefresh size={24} />
+              </div>
+              <div className="text-[13px] font-bold text-[var(--text)]">
+                {selectedBank ? `${bankLabels[selectedBank]} Transfer` : 'Select a Bank'}
+              </div>
+              <div className="text-xs text-subtle">
+                {selectedBank ? 'Show this amount to customer for transfer' : 'Choose a bank above'}
+              </div>
+            </div>
+
+            <button
+              disabled={!canComplete}
+              onClick={processPayment}
+              className="w-full h-11 flex items-center justify-center gap-2 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-40 disabled:cursor-not-allowed text-white font-bold rounded-xl text-sm transition-all"
+            >
+              <IconCheck size={15} /> Complete Sale
+            </button>
+          </div>
+        )}
+
+        {/* POS MACHINE PAYMENT */}
+        {payView === 'pos' && (
+          <div className="flex-1 flex flex-col p-3.5 gap-4">
+            <div className="bg-[var(--surface-2)] border border-[var(--border)] rounded-xl p-3 text-center">
+              <div className="text-[10px] text-subtle font-bold uppercase tracking-widest mb-0.5">Amount Due</div>
+              <div className="text-[30px] font-extrabold text-[var(--text)] tabular-nums">${total.toFixed(2)}</div>
+            </div>
+            
+            <div>
+              <div className="text-[10px] font-bold uppercase tracking-widest text-subtle mb-2">Select POS Machine</div>
+              <div className="grid grid-cols-2 gap-2">
+                {POS_MACHINES.filter(m => payConfig?.pos[m.id === 'gtb_pos' ? 'gtb' : 'firstbank'] ?? true).map(pos => (
+                  <button
+                    key={pos.id}
+                    onClick={() => setSelectedPOS(pos.id)}
+                    className={`h-16 flex flex-col items-center justify-center gap-2 rounded-xl border transition-all ${
+                      selectedPOS === pos.id
+                        ? 'bg-amber-500/15 border-amber-500/50 text-amber-400'
+                        : 'bg-[var(--surface-2)] border-[var(--border-strong)] text-muted hover:border-[var(--border-strong)]'
+                    }`}
+                  >
+                    <span className="text-2xl">💳</span>
+                    <span className="text-[11px] font-bold">{posLabels[pos.id]}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex-1 flex flex-col items-center justify-center gap-3 bg-[var(--surface-2)] border-2 border-dashed border-[var(--border-strong)] rounded-xl p-4 text-center">
+              <div className="w-14 h-14 rounded-full bg-amber-500/15 flex items-center justify-center text-amber-400">
+                <IconCreditCard size={24} />
+              </div>
+              <div className="text-[13px] font-bold text-[var(--text)]">
+                {selectedPOS ? posLabels[selectedPOS] : 'Select POS Machine'}
+              </div>
+              <div className="text-xs text-subtle">
+                {selectedPOS ? 'Ready to process card payment' : 'Choose a POS machine above'}
+              </div>
+            </div>
+
+            <button
+              disabled={!canComplete}
+              onClick={processPayment}
+              className="w-full h-11 flex items-center justify-center gap-2 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-40 disabled:cursor-not-allowed text-white font-bold rounded-xl text-sm transition-all"
+            >
+              <IconCheck size={15} /> Complete Sale
+            </button>
+          </div>
+        )}
+
+        {/* SPLIT PAYMENT */}
+        {payView === 'split' && (
+          <div className="flex-1 flex flex-col p-3.5 gap-3 overflow-y-auto">
+            <div className="bg-[var(--surface-2)] border border-[var(--border)] rounded-xl p-3">
+              <div className="flex justify-between items-center mb-2">
+                <span className="text-[10px] text-subtle font-bold uppercase tracking-widest">Total Due</span>
+                <span className="text-[18px] font-extrabold text-[var(--text)] tabular-nums">${total.toFixed(2)}</span>
+              </div>
+              <div className="flex justify-between items-center mb-2">
+                <span className="text-[10px] text-emerald-400 font-bold uppercase tracking-widest">Paid</span>
+                <span className="text-[14px] font-extrabold text-emerald-400 tabular-nums">${splitTotalPaid.toFixed(2)}</span>
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-[10px] text-amber-400 font-bold uppercase tracking-widest">Remaining</span>
+                <span className={`text-[16px] font-extrabold tabular-nums ${splitRemaining > 0 ? 'text-amber-400' : 'text-emerald-400'}`}>
+                  ${Math.abs(splitRemaining).toFixed(2)}
+                </span>
+              </div>
+            </div>
+
+            {splitPayments.length > 0 && (
+              <div className="bg-[var(--surface-2)] border border-[var(--border)] rounded-xl overflow-hidden">
+                <div className="px-3 py-2 border-b border-[var(--border)]">
+                  <span className="text-[10px] font-bold uppercase tracking-widest text-subtle">Payments</span>
+                </div>
+                {splitPayments.map(payment => (
+                  <div key={payment.id} className="px-3 py-2.5 flex items-center justify-between border-b border-[var(--border)] last:border-0">
+                    <div className="flex items-center gap-2">
+                      <span className="text-base">{methodIcons[payment.method]}</span>
+                      <div>
+                        <div className="text-[12px] font-semibold text-[var(--text)] capitalize">{payment.method}</div>
+                        <div className="text-[10px] text-subtle">
+                          {payment.method === 'transfer' && payment.bank && bankLabels[payment.bank]}
+                          {payment.method === 'pos' && payment.posMachine && posLabels[payment.posMachine]}
+                          {payment.method === 'cash' && 'Cash'}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-[13px] font-extrabold text-emerald-400">${payment.amount.toFixed(2)}</span>
+                      <button
+                        onClick={() => removeSplitPayment(payment.id)}
+                        className="w-5 h-5 rounded flex items-center justify-center text-subtle hover:text-red-400 transition-all"
+                      >
+                        <IconX size={12} />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {splitRemaining > 0 && (
+              <>
+                <div>
+                  <div className="text-[10px] font-bold uppercase tracking-widest text-subtle mb-2">Add Payment Method</div>
+                  <div className="grid grid-cols-3 gap-1.5">
+                    <button
+                      onClick={() => setSplitPaymentType('cash')}
+                      className={`h-12 flex flex-col items-center justify-center gap-1 bg-[var(--input-bg)] border transition-all ${
+                        splitPaymentType === 'cash' ? 'border-emerald-500/50' : 'border-[var(--border-strong)] hover:border-emerald-500/30'
+                      } rounded-lg`}
+                    >
+                      <span className="text-lg">💵</span>
+                      <span className="text-[9px] font-bold text-muted">Cash</span>
+                    </button>
+                    <button
+                      onClick={() => setSplitPaymentType('transfer')}
+                      className={`h-12 flex flex-col items-center justify-center gap-1 bg-[var(--input-bg)] border transition-all ${
+                        splitPaymentType === 'transfer' ? 'border-blue-500/50' : 'border-[var(--border-strong)] hover:border-blue-500/30'
+                      } rounded-lg`}
+                    >
+                      <span className="text-lg">🏦</span>
+                      <span className="text-[9px] font-bold text-muted">Transfer</span>
+                    </button>
+                    <button
+                      onClick={() => setSplitPaymentType('pos')}
+                      className={`h-12 flex flex-col items-center justify-center gap-1 bg-[var(--input-bg)] border transition-all ${
+                        splitPaymentType === 'pos' ? 'border-amber-500/50' : 'border-[var(--border-strong)] hover:border-amber-500/30'
+                      } rounded-lg`}
+                    >
+                      <span className="text-lg">💳</span>
+                      <span className="text-[9px] font-bold text-muted">POS</span>
+                    </button>
+                  </div>
+                </div>
+
+                {splitPaymentType === 'cash' && (
+                  <>
+                    <div className="bg-emerald-500/15 border border-emerald-500/30 rounded-xl p-2.5 text-center">
+                      <div className="text-[10px] text-emerald-400 font-bold uppercase tracking-widest mb-0.5">Enter Cash Amount</div>
+                      <div className="text-[22px] font-extrabold text-emerald-400 tabular-nums min-h-[28px]">${splitCashInput || '0'}</div>
+                    </div>
+
+                    <div className="grid grid-cols-4 gap-1">
+                      {['1','2','3','4','5','6','7','8','9','.','0','DEL'].map(k => (
+                        <button
+                          key={k}
+                          onClick={() => handleSplitNumPad(k)}
+                          className={`h-10 rounded-lg text-[16px] font-bold transition-all active:scale-95 ${
+                            k === 'DEL'
+                              ? 'bg-red-500/10 border border-red-500/25 text-red-400 text-xs'
+                              : 'bg-[var(--surface-2)] border border-[var(--border)] text-[var(--text)] hover:bg-[var(--input-bg)]'
+                          }`}
+                        >
+                          {k}
+                        </button>
+                      ))}
+                    </div>
+
+                    <button
+                      onClick={() => {
+                        const amount = parseFloat(splitCashInput) || 0;
+                        if (amount > 0 && amount <= splitRemaining) {
+                          addSplitPayment('cash', amount);
+                        } else if (amount > splitRemaining) {
+                          addSplitPayment('cash', splitRemaining);
+                        }
+                      }}
+                      disabled={!splitCashInput || parseFloat(splitCashInput) <= 0}
+                      className="w-full h-11 flex items-center justify-center gap-2 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-40 disabled:cursor-not-allowed text-white font-bold rounded-xl text-sm transition-all"
+                    >
+                      Add Cash Payment
+                    </button>
+                  </>
+                )}
+
+                {splitPaymentType === 'transfer' && (
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      onClick={() => addSplitPayment('transfer', splitRemaining, 'gtb')}
+                      className="h-16 flex flex-col items-center justify-center gap-1 bg-[var(--input-bg)] border border-[var(--border-strong)] hover:border-blue-500/50 rounded-xl transition-all"
+                    >
+                      <span className="text-2xl">🏦</span>
+                      <span className="text-[11px] font-bold text-[var(--text)]">GTBank</span>
+                      <span className="text-[10px] font-bold text-blue-400">${splitRemaining.toFixed(2)}</span>
+                    </button>
+                    <button
+                      onClick={() => addSplitPayment('transfer', splitRemaining, 'firstbank')}
+                      className="h-16 flex flex-col items-center justify-center gap-1 bg-[var(--input-bg)] border border-[var(--border-strong)] hover:border-blue-500/50 rounded-xl transition-all"
+                    >
+                      <span className="text-2xl">🏦</span>
+                      <span className="text-[11px] font-bold text-[var(--text)]">FirstBank</span>
+                      <span className="text-[10px] font-bold text-blue-400">${splitRemaining.toFixed(2)}</span>
+                    </button>
+                  </div>
+                )}
+
+                {splitPaymentType === 'pos' && (
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      onClick={() => addSplitPayment('pos', splitRemaining, undefined, 'gtb_pos')}
+                      className="h-16 flex flex-col items-center justify-center gap-1 bg-[var(--input-bg)] border border-[var(--border-strong)] hover:border-amber-500/50 rounded-xl transition-all"
+                    >
+                      <span className="text-2xl">💳</span>
+                      <span className="text-[11px] font-bold text-[var(--text)]">GTBank POS</span>
+                      <span className="text-[10px] font-bold text-amber-400">${splitRemaining.toFixed(2)}</span>
+                    </button>
+                    <button
+                      onClick={() => addSplitPayment('pos', splitRemaining, undefined, 'firstbank_pos')}
+                      className="h-16 flex flex-col items-center justify-center gap-1 bg-[var(--input-bg)] border border-[var(--border-strong)] hover:border-amber-500/50 rounded-xl transition-all"
+                    >
+                      <span className="text-2xl">💳</span>
+                      <span className="text-[11px] font-bold text-[var(--text)]">FirstBank POS</span>
+                      <span className="text-[10px] font-bold text-amber-400">${splitRemaining.toFixed(2)}</span>
+                    </button>
+                  </div>
+                )}
+              </>
+            )}
+
+            <button
+              disabled={!canComplete}
+              onClick={processPayment}
+              className="w-full h-11 flex items-center justify-center gap-2 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-40 disabled:cursor-not-allowed text-white font-bold rounded-xl text-sm transition-all"
+            >
+              <IconCheck size={15} /> Complete Sale
+            </button>
+          </div>
+        )}
       </div>
+
+      {/* Product Info Panel */}
+      <ProductInfoPanel
+        isOpen={isProductPanelOpen}
+        onClose={() => setIsProductPanelOpen(false)}
+        product={selectedProduct}
+        branchInventory={selectedProduct ? getBranchInventory(selectedProduct.id) : []}
+        onAddToCart={handleAddToCart}
+      />
+
+      {/* Add Customer Modal */}
+      <AddCustomerModal
+        isOpen={isAddCustomerOpen}
+        onClose={() => setIsAddCustomerOpen(false)}
+        onAdd={handleAddCustomer}
+      />
+
+      {/* Staff Selection Modal */}
+      <StaffSelectionModal
+        isOpen={isStaffModalOpen}
+        onClose={() => setIsStaffModalOpen(false)}
+        onSelect={handleStaffSelect}
+        staffList={staffList}
+      />
+
+      {/* Receipt Modal — keyed per sale so its state (email, sent) starts fresh */}
+      <ReceiptModal
+        key={completedSaleData?.orderNumber ?? 'receipt'}
+        isOpen={isReceiptModalOpen}
+        onClose={handleReceiptClose}
+        customer={selectedCustomer}
+        cart={cart}
+        total={total}
+        tax={tax}
+        subtotal={subtotal}
+        paymentMethod={completedSaleData?.paymentMethod || ''}
+        staffName={completedSaleData?.staffName || ''}
+        orderNumber={completedSaleData?.orderNumber}
+      />
     </div>
   );
 }

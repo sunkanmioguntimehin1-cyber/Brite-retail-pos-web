@@ -1,9 +1,7 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Toaster } from 'react-hot-toast';
 import "./globals.css";
-
-const geistSans = Geist({ variable: "--font-geist-sans", subsets: ["latin"] });
-const geistMono = Geist_Mono({ variable: "--font-geist-mono", subsets: ["latin"] });
+import { Providers } from "./providers";
 
 export const metadata: Metadata = {
   title: "RetailCore POS",
@@ -12,8 +10,36 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={`${geistSans.variable} ${geistMono.variable} h-full`}>
-      <body className="h-full antialiased">{children}</body>
+    <html lang="en" className="dark h-full">
+      <body className="h-full antialiased">
+        <Providers>{children}</Providers>
+        <Toaster 
+          position="top-right"
+          toastOptions={{
+            duration: 4000,
+            style: {
+              background: 'var(--surface-2)',
+              color: 'var(--text)',
+              border: '1px solid var(--border)',
+              borderRadius: '12px',
+              boxShadow: 'var(--shadow-lg)',
+              fontSize: '13px',
+            },
+            success: {
+              iconTheme: {
+                primary: 'var(--success)',
+                secondary: 'var(--surface-2)',
+              },
+            },
+            error: {
+              iconTheme: {
+                primary: 'var(--danger)',
+                secondary: 'var(--surface-2)',
+              },
+            },
+          }}
+        />
+      </body>
     </html>
   );
 }
