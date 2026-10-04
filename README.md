@@ -18,7 +18,7 @@ cp .env.example .env.local
 ```
 
 Edit `.env.local`:
-- `NEXT_PUBLIC_API_URL`: Your backend API URL (default: http://localhost:5000)
+- `NEXT_PUBLIC_API_URL`: Your backend API URL (default: http://localhost:5001)
 
 ### 3. Run the Development Server
 
@@ -26,7 +26,10 @@ Edit `.env.local`:
 npm run dev
 ```
 
-Frontend runs on `http://localhost:3000`
+Frontend runs on `http://localhost:3000`. The port is pinned via `next dev -p 3000`
+in `package.json` so a port collision fails loudly instead of silently falling back
+to 3001 — the backend's CORS allow-list is keyed to specific origins, so a surprise
+port shift shows up as an inscrutable CORS error.
 
 ## Structure
 
@@ -63,4 +66,4 @@ All API calls go to the Express.js backend. The frontend includes:
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `NEXT_PUBLIC_API_URL` | Backend API URL | http://localhost:5000 |
+| `NEXT_PUBLIC_API_URL` | Backend API URL | http://localhost:5001 |

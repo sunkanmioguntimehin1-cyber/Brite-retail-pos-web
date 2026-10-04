@@ -2,18 +2,24 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import toast from 'react-hot-toast';
 import { productsApi, Product, CreateProductData, Category } from '@/lib/api';
 import { snapshotLists, patchLists, restoreLists } from './optimistic';
+import { MOVEMENTS_KEY } from './useStockMovements';
 
-export type { Product, Category, CreateProductData } from '@/lib/api/products';
+export type { Product, Category, CreateProductData, ProductStockLevel } from '@/lib/api/products';
 export { getProductCategoryName, getProductCategoryId } from '@/lib/api/products';
 
 const PRODUCTS = ['products'] as const;
 const CATEGORIES = ['categories'] as const;
 
-export function useProducts(filters?: { category?: string; search?: string; isActive?: boolean }) {
+export function useProducts(filters?: { category?: string; search?: string; isActive?: boolean; branchId?: string; enabled?: boolean }) {
+  // `enabled` only controls whether the query runs (used by the Branch Details
+  // panel) and is stripped so it never becomes an API parameter.
+  const { enabled = true, ...query } = filters || {};
+
   return useQuery({
-    queryKey: ['products', filters],
-    queryFn: () => productsApi.getAll(filters),
+    queryKey: ['products', query],
+    queryFn: () => productsApi.getAll(query),
     staleTime: 60 * 1000,
+    enabled,
   });
 }
 
@@ -41,6 +47,9 @@ export function useCreateProduct() {
           ...newProduct,
           id: `temp-${Date.now()}`,
           stock: newProduct.stock || 0,
+          // New stock is booked into the head office, so on day one the total
+          // and the location figure are the same number.
+          totalStock: newProduct.stock || 0,
           lowStockThreshold: newProduct.lowStockThreshold || 10,
           isActive: newProduct.isActive ?? true,
           createdAt: new Date().toISOString(),
@@ -57,6 +66,7 @@ export function useCreateProduct() {
     },
     onSettled: () => {
       queryClient.invalidateQueries({ queryKey: PRODUCTS });
+      queryClient.invalidateQueries({ queryKey: MOVEMENTS_KEY });
     },
   });
 }
@@ -120,13 +130,48 @@ export function useAdjustStock() {
   const queryClient = useQueryClient();
 
   return useMutation({
-    mutationFn: ({ productId, adjustment, type }: { productId: string; adjustment: number; type?: 'set' | 'adjust' }) =>
-      productsApi.adjustStock(productId, adjustment, type),
+    mutationFn: ({ productId, adjustment, type, branchId }: {
+      productId: string;
+      adjustment: number;
+      type?: 'set' | 'adjust';
+      branchId?: string;
+    }) => productsApi.adjustStock(productId, adjustment, type, branchId),
     onSuccess: () => {
       toast.success('Stock adjusted successfully!');
     },
     onSettled: () => {
       queryClient.invalidateQueries({ queryKey: ['products'] });
+      queryClient.invalidateQueries({ queryKey: ['product-stock'] });
+      queryClient.invalidateQueries({ queryKey: MOVEMENTS_KEY });
+    },
+  });
+}
+
+/** Where a single product's stock is held, by location. */
+export function useProductStock(productId: string | null) {
+  return useQuery({
+    // Shares the ['product', id] prefix prefix with useProduct; both are
+    // per-product reads that must not collide with the list caches.
+    queryKey: ['product-stock', productId],
+    queryFn: () => productsApi.getStock(productId as string),
+    enabled: !!productId,
+  });
+}
+
+/** Sets a product's reorder target for one location. */
+export function useSetStockTarget() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: ({ productId, branchId, minQuantity }: { productId: string; branchId: string; minQuantity: number }) =>
+      productsApi.setStockTarget(productId, branchId, minQuantity),
+    onSuccess: () => {
+      toast.success('Reorder level updated!');
+    },
+    onSettled: () => {
+      // The products list carries `minQuantity`, so the Inventory screen must
+      // refetch so the new target reshades the low-stock statuses.
+      queryClient.invalidateQueries({ queryKey: PRODUCTS });
     },
   });
 }
