@@ -3,19 +3,28 @@ export interface Staff {
   name: string;
   email?: string;
   phone?: string;
-  role: 'admin' | 'manager' | 'cashier';
+  /** The role key — a string naming a role in /api/roles, e.g. 'floor-supervisor'. */
+  role: string;
+  /** Display name + badge colour for the role, attached at read time by the backend. */
+  roleName?: string;
+  roleColor?: string;
   status: 'active' | 'inactive';
+  branchId: string | null;
+  branchName?: string;
+  branchType?: 'head_office' | 'branch';
   createdAt?: string;
 }
 
 export interface StaffFormData {
   name: string;
   email?: string;
-  role: 'admin' | 'manager' | 'cashier';
+  role: string;
   phone?: string;
   password?: string;
   pin?: string;
   status: 'active' | 'inactive';
+  /** Empty means the head office — the location new stock is received at. */
+  branchId?: string;
 }
 
 export const emptyStaffFormData: StaffFormData = {
@@ -26,4 +35,5 @@ export const emptyStaffFormData: StaffFormData = {
   password: '',
   pin: '',
   status: 'active',
+  branchId: '',
 };

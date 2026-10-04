@@ -1,6 +1,6 @@
 'use client';
 import { SidePanel } from '@/components/ui/SidePanel';
-import { IconMail, IconPhone, IconLock, IconCheck, IconX } from '@/components/ui/Icons';
+import { IconMail, IconPhone, IconLock, IconCheck, IconX, IconStore } from '@/components/ui/Icons';
 import { Staff } from './types';
 
 interface ViewStaffPanelProps {
@@ -39,8 +39,8 @@ export function ViewStaffPanel({ isOpen, onClose, staff }: ViewStaffPanelProps) 
             </div>
             <div>
               <h3 className="text-[15px] font-bold text-[var(--text)]">{staff.name}</h3>
-              <span className={`inline-flex px-2.5 py-0.5 rounded-full text-[10px] font-bold mt-1 ${roleColors[staff.role]}`}>
-                {roleLabels[staff.role]}
+              <span className={`inline-flex px-2.5 py-0.5 rounded-full text-[10px] font-bold mt-1 ${staff.roleColor ?? roleColors[staff.role] ?? 'bg-blue-500/15 text-blue-400'}`}>
+                {staff.roleName ?? roleLabels[staff.role] ?? staff.role}
               </span>
             </div>
             <div className="ml-auto">
@@ -78,6 +78,20 @@ export function ViewStaffPanel({ isOpen, onClose, staff }: ViewStaffPanelProps) 
               <div>
                 <div className="text-[10px] text-subtle uppercase">Phone</div>
                 <div className="text-[13px] text-[var(--text)]">{staff.phone}</div>
+              </div>
+            </div>
+            <div className="flex items-center gap-3">
+              <div className="w-8 h-8 rounded-lg bg-purple-500/10 flex items-center justify-center text-purple-400">
+                <IconStore size={14} />
+              </div>
+              <div>
+                <div className="text-[10px] text-subtle uppercase">Works At</div>
+                <div className="text-[13px] text-[var(--text)]">
+                  {staff.branchName ?? 'Unassigned'}
+                  {staff.branchType === 'head_office' && (
+                    <span className="ml-1.5 text-[10px] font-bold text-subtle">HQ</span>
+                  )}
+                </div>
               </div>
             </div>
             <div className="flex items-center gap-3">
