@@ -3,21 +3,31 @@ import { useState, useEffect } from 'react';
 import { useForm } from 'react-hook-form';
 import { Modal } from '@/components/ui/Modal';
 import { ProductForm, ProductFormData, emptyFormData } from './ProductForm';
+import { generateBarcode } from '@/lib/utils/barcode';
 
 interface AddProductFormData {
   name: string;
   productCode: string;
+  description: string;
+  size: string;
+  colour: string;
+  barcode: string;
   sellingPrice: number;
-  cost: number;
+  cost?: number;
+  overheadCost?: number;
+  operatingCost?: number;
   stock: number;
   categoryId?: string;
   isActive?: boolean;
+  taxable: boolean;
   image?: string;
 }
 
 interface AddProductModalProps {
   isOpen: boolean;
   onClose: () => void;
+  /** Whether the user may enter cost, overhead and operating costs. */
+  canViewCost?: boolean;
   onAdd: (product: AddProductFormData) => void;
 }
 
@@ -27,8 +37,9 @@ const generateProductCode = (): string => {
   return `PRD-${timestamp}-${random}`;
 };
 
-export function AddProductModal({ isOpen, onClose, onAdd }: AddProductModalProps) {
+export function AddProductModal({ isOpen, onClose, canViewCost = true, onAdd }: AddProductModalProps) {
   const [imagePreview, setImagePreview] = useState<string | null>(null);
+  const [barcode, setBarcode] = useState<string>('');
   
   const {
     control,
@@ -50,6 +61,15 @@ export function AddProductModal({ isOpen, onClose, onAdd }: AddProductModalProps
     }
   }, [productCodeType, isOpen, setValue]);
 
+  useEffect(() => {
+    if (isOpen) {
+      // Fresh scannable EAN-13 barcode each time the Add form opens. The
+      // backend falls back to generating one too, for products created via
+      // other flows (e.g. Inventory).
+      setBarcode(generateBarcode());
+    }
+  }, [isOpen]);
+
   const validateForm = (data: ProductFormData): boolean => {
     let hasErrors = false;
     
@@ -61,7 +81,7 @@ export function AddProductModal({ isOpen, onClose, onAdd }: AddProductModalProps
       setError('sellingPrice', { type: 'manual', message: 'Valid selling price is required' });
       hasErrors = true;
     }
-    if (!data.cost || parseFloat(data.cost) < 0) {
+    if (canViewCost && (!data.cost || parseFloat(data.cost) < 0)) {
       setError('cost', { type: 'manual', message: 'Valid cost is required' });
       hasErrors = true;
     }
@@ -79,16 +99,25 @@ export function AddProductModal({ isOpen, onClose, onAdd }: AddProductModalProps
     const sellingPrice = parseFloat(formData.sellingPrice);
     const cost = parseFloat(formData.cost);
     const stock = parseInt(formData.stock);
+    const overheadCost = parseFloat(formData.overheadCost);
+    const operatingCost = parseFloat(formData.operatingCost);
 
     onAdd({
       // Reuse the code shown in the form rather than generating a second one.
       productCode: formData.productCode.trim() || generateProductCode(),
       name: formData.name,
+      description: formData.description.trim(),
+      size: formData.size.trim(),
+      colour: formData.colour.trim(),
+      barcode,
       sellingPrice,
-      cost,
+      cost: canViewCost ? cost : undefined,
+      overheadCost: Number.isNaN(overheadCost) ? undefined : overheadCost,
+      operatingCost: Number.isNaN(operatingCost) ? undefined : operatingCost,
       stock,
       categoryId: formData.category || undefined,
       isActive: formData.status !== 'inactive',
+      taxable: formData.taxable,
       image: imagePreview || undefined,
     });
 
@@ -98,6 +127,7 @@ export function AddProductModal({ isOpen, onClose, onAdd }: AddProductModalProps
   const handleClose = () => {
     reset(emptyFormData);
     setImagePreview(null);
+    setBarcode('');
     onClose();
   };
 
@@ -129,6 +159,9 @@ export function AddProductModal({ isOpen, onClose, onAdd }: AddProductModalProps
         errors={errors}
         imagePreview={imagePreview}
         setImagePreview={setImagePreview}
+        showTax
+        canViewCost={canViewCost}
+        barcode={barcode}
       />
     </Modal>
   );

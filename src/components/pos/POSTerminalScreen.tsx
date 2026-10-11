@@ -1,5 +1,5 @@
 'use client';
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useRef } from 'react';
 import toast from 'react-hot-toast';
 import {
   IconSearch, IconScan, IconTrash, IconPlus, IconMinus,
@@ -18,7 +18,7 @@ import {
 import { Staff } from '@/components/staff/types';
 import {
   useProducts, useCategories, useCustomers, useCreateCustomer, useStaff, useCreateOrder, useActiveBranch,
-  useStore,
+  useStore, useUpdateStore,
   getProductCategoryId, getProductCategoryName,
 } from '@/lib/hooks';
 
@@ -75,17 +75,28 @@ export function POSTerminalScreen() {
   const { data: store } = useStore();
   const createOrder = useCreateOrder();
   const createCustomer = useCreateCustomer();
+  const updateStore = useUpdateStore();
 
   /** Payment methods disabled in Settings are not offered at the till. */
   const payConfig = store?.settings?.paymentMethods;
   const cashEnabled = payConfig?.cash ?? true;
-  const transferEnabled = payConfig ? payConfig.transfer.enabled && (payConfig.transfer.gtb || payConfig.transfer.firstbank) : true;
-  const posEnabled = payConfig ? payConfig.pos.enabled && (payConfig.pos.gtb || payConfig.pos.firstbank) : true;
+  const transferEnabled = payConfig
+    ? payConfig.transfer.enabled && (payConfig.transfer.gtb || payConfig.transfer.firstbank)
+    : true;
+  const posTerminals = payConfig?.pos?.terminals ?? [];
+  const posEnabled = payConfig
+    ? payConfig.pos.enabled && posTerminals.some((t) => t.enabled)
+    : true;
   const availableMethods = [cashEnabled, transferEnabled, posEnabled].filter(Boolean).length;
 
   const [cart, setCart] = useState<CartItem[]>([]);
+  const [taxEnabled, setTaxEnabled] = useState(true);
+  const [discountEnabled, setDiscountEnabled] = useState(false);
   const [search, setSearch] = useState('');
   const [activeCat, setActiveCat] = useState<string>(ALL_CATEGORIES);
+  const [scanValue, setScanValue] = useState('');
+  const [scanError, setScanError] = useState<string | null>(null);
+  const scanRef = useRef<HTMLInputElement>(null);
   const [payView, setPayView] = useState<PayView>('methods');
   const [cashInput, setCashInput] = useState('');
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
@@ -97,7 +108,7 @@ export function POSTerminalScreen() {
   
   // Transfer/POS selection
   const [selectedBank, setSelectedBank] = useState<BankType | null>(null);
-  const [selectedPOS, setSelectedPOS] = useState<POSMachineType | null>(null);
+  const [selectedPOS, setSelectedPOS] = useState<string | null>(null);
   
   // Split payment
   const [splitPayments, setSplitPayments] = useState<SplitPayment[]>([]);
@@ -115,8 +126,11 @@ export function POSTerminalScreen() {
   } | null>(null);
 
   const filtered = products.filter((p: Product) =>
+    p.stock > 0 &&
     (activeCat === ALL_CATEGORIES || getProductCategoryId(p) === activeCat) &&
-    (p.name.toLowerCase().includes(search.toLowerCase()) || p.sku?.toLowerCase().includes(search.toLowerCase()))
+    (p.name.toLowerCase().includes(search.toLowerCase()) ||
+      p.sku?.toLowerCase().includes(search.toLowerCase()) ||
+      p.barcode?.toLowerCase().includes(search.toLowerCase()))
   );
 
   const filteredCustomers = customers.filter((c: Customer) =>
@@ -153,13 +167,37 @@ export function POSTerminalScreen() {
     setSplitCashInput('');
     setSplitPaymentType('cash');
     setSelectedStaff(null);
+    setTaxEnabled(true);
+    setDiscountEnabled(false);
     setCompletedSaleData(null);
     setIsReceiptModalOpen(false);
   };
 
+  const taxRate = store?.settings?.tax?.rate ?? 8.25;
+  const taxIncluded = store?.settings?.tax?.includedInPrice ?? false;
+  const discountRate = store?.settings?.discount?.rate ?? 0;
   const subtotal = useMemo(() => cart.reduce((s, c) => s + c.price * c.qty, 0), [cart]);
-  const tax = subtotal * 0.0825;
-  const total = subtotal + tax;
+  // Only products flagged taxable contribute tax. Read via `!== false` so any
+  // legacy product without the flag still counts as taxable.
+  const taxableSubtotal = useMemo(
+    () => cart.reduce((s, c) => s + (c.taxable !== false ? c.price * c.qty : 0), 0),
+    [cart],
+  );
+  // When tax is included in the price it is the portion already inside the
+  // subtotal; otherwise it is charged on top of the taxable goods only. The
+  // cashier can switch tax off for the whole sale with the toggle at checkout.
+  const tax = !taxEnabled
+    ? 0
+    : taxIncluded
+      ? taxableSubtotal * (taxRate / (100 + taxRate))
+      : taxableSubtotal * (taxRate / 100);
+  const grossTotal = taxIncluded ? subtotal : subtotal + tax;
+  // The discount is a percentage of the tax-inclusive total: the admin sets the
+  // rate, the cashier only decides whether to give it. Tax is left untouched.
+  const { discountAmount, total } = useMemo(() => {
+    const discount = discountEnabled ? round2(grossTotal * (discountRate / 100)) : 0;
+    return { discountAmount: discount, total: round2(grossTotal - discount) };
+  }, [discountEnabled, grossTotal, discountRate]);
   const totalItems = cart.reduce((s, c) => s + c.qty, 0);
   const cashNum = parseFloat(cashInput || '0');
   const change = cashNum - total;
@@ -193,12 +231,18 @@ export function POSTerminalScreen() {
   const buildPaymentLabel = () => {
     if (payView === 'cash') return 'Cash';
     if (payView === 'transfer' && selectedBank) return `Transfer (${bankLabels[selectedBank]})`;
-    if (payView === 'pos' && selectedPOS) return `POS (${posLabels[selectedPOS]})`;
+    if (payView === 'pos' && selectedPOS) {
+      const name = payConfig?.pos?.terminals?.find((t) => t.id === selectedPOS)?.name || posLabels[selectedPOS as keyof typeof posLabels] || selectedPOS;
+      return `POS (${name})`;
+    }
     if (payView === 'split') {
       return splitPayments.map(p => {
         if (p.method === 'cash') return 'Cash';
         if (p.method === 'transfer' && p.bank) return `Transfer (${bankLabels[p.bank]})`;
-        if (p.method === 'pos' && p.posMachine) return `POS (${posLabels[p.posMachine]})`;
+        if (p.method === 'pos' && p.posMachine) {
+          const name = payConfig?.pos?.terminals?.find((t) => t.id === p.posMachine)?.name || posLabels[p.posMachine as keyof typeof posLabels] || p.posMachine;
+          return `POS (${name})`;
+        }
         return p.method;
       }).join(' + ');
     }
@@ -226,6 +270,8 @@ export function POSTerminalScreen() {
         })),
         subtotal: orderSubtotal,
         tax: orderTax,
+        discount: round2(discountAmount),
+        discountRate: discountEnabled ? discountRate : 0,
         total: orderTotal,
         paymentMethod: buildPaymentLabel(),
         staffId: staff.id,
@@ -265,6 +311,26 @@ export function POSTerminalScreen() {
     addItem(product);
   };
 
+  // Barcode scanner: USB/wireless wedge scanners behave like a keyboard that
+  // types the digits and presses Enter. Resolve against the loaded catalog so
+  // no extra round-trip is needed, then surface the full product details.
+  const handleScan = () => {
+    const code = scanValue.trim();
+    if (!code) {
+      scanRef.current?.focus();
+      return;
+    }
+    const match = products.find(p => p.barcode === code && p.stock > 0 && p.isActive !== false);
+    if (match) {
+      setScanValue('');
+      setScanError(null);
+      handleProductInfo(match);
+    } else {
+      setScanError(`No product found for barcode "${code}"`);
+      scanRef.current?.focus();
+    }
+  };
+
   const handleSelectCustomer = (customer: Customer) => {
     setSelectedCustomer(customer);
     setCustomerSearch('');
@@ -275,12 +341,24 @@ export function POSTerminalScreen() {
     setSelectedCustomer(null);
   };
 
-  const handleAddCustomer = async (data: { name: string; phone: string; email?: string }) => {
+  const handleAddCustomer = async (data: {
+    name: string;
+    phone: string;
+    email: string;
+    address?: string;
+    weddingAnniversary?: string;
+    proposalAnniversary?: string;
+    notes?: string;
+  }) => {
     // `tier` is server-assigned (always bronze on create), so it is not sent.
     const created = await createCustomer.mutateAsync({
       name: data.name,
       phone: data.phone,
       email: data.email,
+      address: data.address,
+      weddingAnniversary: data.weddingAnniversary,
+      proposalAnniversary: data.proposalAnniversary,
+      notes: data.notes,
     });
     // Link the new customer to the open sale so the order is attributed to them.
     setSelectedCustomer(created);
@@ -311,6 +389,21 @@ export function POSTerminalScreen() {
     setSplitPayments(prev => prev.filter(p => p.id !== id));
   };
 
+  /** Hides a POS machine from the till by removing it from the saved terminals. */
+  const removePosMachine = (terminalId: string) => {
+    if (!payConfig) return;
+    const terminals = (payConfig.pos.terminals || []).filter((t) => t.id !== terminalId);
+    updateStore.mutate({
+      settings: {
+        ...store?.settings,
+        paymentMethods: { ...payConfig, pos: { ...payConfig.pos, terminals } },
+      },
+    });
+    if (selectedPOS === terminalId) setSelectedPOS(null);
+    // No machines left to charge on — drop the cashier back to the method list.
+    if (!terminals.some((t) => t.enabled)) setPayView('methods');
+  };
+
   const canComplete = useMemo(() => {
     if (payView === 'cash') return cashNum >= total;
     if (payView === 'transfer') return selectedBank !== null;
@@ -336,9 +429,24 @@ export function POSTerminalScreen() {
             />
           </div>
           <LocationSwitcher locked={cart.length > 0} />
-          <button className="flex items-center gap-1.5 h-9 px-3.5 bg-[var(--surface-2)] border border-[var(--border-strong)] text-muted hover:text-[var(--text)] hover:bg-[var(--input-bg)] rounded-lg text-[13px] font-semibold transition-all flex-shrink-0">
-            <IconScan size={14} /> Scan
-          </button>
+          <div className="relative flex-shrink-0" style={{ width: 190 }}>
+            <span className="absolute left-2.5 top-1/2 -translate-y-1/2 text-subtle pointer-events-none">
+              <IconScan size={14} />
+            </span>
+            <input
+              ref={scanRef}
+              className="w-full h-9 pl-8 pr-3 bg-[var(--surface-2)] border border-[var(--border-strong)] rounded-lg text-[var(--text)] text-[13px] placeholder:text-subtle outline-none focus:border-blue-500 focus:shadow-[0_0_0_3px_rgba(59,130,246,0.15)] transition-all"
+              placeholder="Scan barcode…"
+              value={scanValue}
+              autoComplete="off"
+              spellCheck={false}
+              onChange={e => { setScanValue(e.target.value); setScanError(null); }}
+              onKeyDown={e => { if (e.key === 'Enter') handleScan(); }}
+            />
+            {scanError && (
+              <div className="absolute top-full mt-1 left-0 text-[10px] text-red-400 whitespace-nowrap">{scanError}</div>
+            )}
+          </div>
         </div>
 
         <div className="flex gap-1.5 overflow-x-auto pb-0.5">
@@ -382,10 +490,16 @@ export function POSTerminalScreen() {
                       {inCart.qty}
                     </div>
                   )}
-                  <div className="text-[26px] mb-1.5 leading-none">📦</div>
+                  {p.image ? (
+                    <div className="h-14 mb-1.5 rounded-lg overflow-hidden flex items-center justify-center bg-[var(--input-bg)]">
+                      <img src={p.image} alt={p.name} className="h-full w-full object-cover" />
+                    </div>
+                  ) : (
+                    <div className="text-[26px] mb-1.5 leading-none">📦</div>
+                  )}
                   <div className="text-[11px] font-bold text-[var(--text)] mb-0.5 leading-snug">{p.name}</div>
                   <div className="font-mono text-[10px] text-subtle mb-1.5">{p.sku}</div>
-                  <div className="text-[15px] font-extrabold text-blue-400 tabular-nums">${p.price.toFixed(2)}</div>
+                  <div className="text-[15px] font-extrabold text-blue-400 tabular-nums">₦{p.price.toFixed(2)}</div>
                   <div className="text-[9px] text-subtle mt-0.5">{getProductCategoryName(p)}</div>
                 </button>
                 <button
@@ -517,7 +631,7 @@ export function POSTerminalScreen() {
               <IconCheck size={32} />
             </div>
             <div className="text-xl font-extrabold text-emerald-400">Payment Successful!</div>
-            <div className="text-[30px] font-extrabold text-[var(--text)] tabular-nums">${total.toFixed(2)}</div>
+            <div className="text-[30px] font-extrabold text-[var(--text)] tabular-nums">₦{total.toFixed(2)}</div>
             {completedSaleData?.orderNumber && (
               <div className="text-[11px] text-subtle">
                 Order <span className="font-mono text-muted">{completedSaleData.orderNumber}</span>
@@ -551,10 +665,16 @@ export function POSTerminalScreen() {
                   >
                     <IconInfo size={13} />
                   </button>
-                  <div className="text-[20px] flex-shrink-0">📦</div>
+                  {item.image ? (
+                    <div className="h-9 w-9 flex-shrink-0 rounded-lg overflow-hidden bg-[var(--input-bg)]">
+                      <img src={item.image} alt={item.name} className="h-full w-full object-cover" />
+                    </div>
+                  ) : (
+                    <div className="text-[20px] flex-shrink-0">📦</div>
+                  )}
                   <div className="flex-1 min-w-0">
                     <div className="text-xs font-bold text-[var(--text)] truncate">{item.name}</div>
-                    <div className="font-mono text-[10px] text-subtle mt-px">{item.sku} · ${item.price.toFixed(2)} ea</div>
+                    <div className="font-mono text-[10px] text-subtle mt-px">{item.sku} · ₦{item.price.toFixed(2)} ea</div>
                   </div>
                   <div className="flex items-center gap-1.5 flex-shrink-0">
                     <button onClick={() => updateQty(item.id, -1)} className="w-6 h-6 rounded-md border border-[var(--border-strong)] bg-[var(--input-bg)] text-muted hover:bg-blue-500/15 hover:border-blue-500/30 hover:text-blue-400 flex items-center justify-center transition-all active:scale-90">
@@ -565,7 +685,7 @@ export function POSTerminalScreen() {
                       <IconPlus size={10} />
                     </button>
                   </div>
-                  <div className="text-[13px] font-extrabold text-[var(--text)] min-w-[50px] text-right tabular-nums">${(item.price * item.qty).toFixed(2)}</div>
+                  <div className="text-[13px] font-extrabold text-[var(--text)] min-w-[50px] text-right tabular-nums">₦{(item.price * item.qty).toFixed(2)}</div>
                   <button onClick={() => removeItem(item.id)} className="w-6 h-6 rounded-md flex items-center justify-center text-subtle hover:text-red-400 transition-all flex-shrink-0">
                     <IconX size={11} />
                   </button>
@@ -576,14 +696,47 @@ export function POSTerminalScreen() {
             <div className="p-3.5 border-t border-[var(--border)] bg-[var(--surface-2)] flex-shrink-0">
               <div className="flex flex-col gap-1 mb-3">
                 <div className="flex justify-between text-xs text-muted">
-                  <span>Subtotal</span><span className="tabular-nums">${subtotal.toFixed(2)}</span>
+                  <span>Subtotal</span><span className="tabular-nums">₦{subtotal.toFixed(2)}</span>
                 </div>
-                <div className="flex justify-between text-xs text-muted">
-                  <span>Tax (8.25%)</span><span className="tabular-nums">${tax.toFixed(2)}</span>
+                <div className="flex justify-between items-center text-xs text-muted">
+                  <span className="flex items-center gap-1.5">
+                    Tax ({taxRate.toFixed(2)}%){taxIncluded ? ' · included' : ''}
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={taxEnabled}
+                      onClick={() => setTaxEnabled(v => !v)}
+                      title={taxEnabled ? 'Turn tax off for this sale' : 'Turn tax on for this sale'}
+                      className={`w-8 h-4 rounded-full transition-all relative flex-shrink-0 ${taxEnabled ? 'bg-emerald-500' : 'bg-[var(--border-strong)]'}`}
+                    >
+                      <span className={`absolute top-0.5 w-3 h-3 rounded-full bg-white shadow transition-all ${taxEnabled ? 'left-4' : 'left-0.5'}`} />
+                    </button>
+                  </span>
+                  <span className="tabular-nums">₦{tax.toFixed(2)}</span>
                 </div>
+                {discountRate > 0 && (
+                  <div className="flex justify-between items-center text-xs text-muted">
+                    <span className="flex items-center gap-1.5">
+                      Discount ({discountRate.toFixed(2)}%)
+                      <button
+                        type="button"
+                        role="switch"
+                        aria-checked={discountEnabled}
+                        onClick={() => setDiscountEnabled(v => !v)}
+                        title={discountEnabled ? 'Remove the discount from this sale' : 'Apply the discount to this sale'}
+                        className={`w-8 h-4 rounded-full transition-all relative flex-shrink-0 ${discountEnabled ? 'bg-amber-500' : 'bg-[var(--border-strong)]'}`}
+                      >
+                        <span className={`absolute top-0.5 w-3 h-3 rounded-full bg-white shadow transition-all ${discountEnabled ? 'left-4' : 'left-0.5'}`} />
+                      </button>
+                    </span>
+                    <span className={`tabular-nums ${discountEnabled ? 'text-amber-400' : ''}`}>
+                      {discountEnabled ? `-₦${discountAmount.toFixed(2)}` : '₦0.00'}
+                    </span>
+                  </div>
+                )}
                 <div className="h-px bg-[var(--input-bg)] my-1" />
                 <div className="flex justify-between text-lg font-extrabold text-[var(--text)]">
-                  <span>Total</span><span className="tabular-nums">${total.toFixed(2)}</span>
+                  <span>Total</span><span className="tabular-nums">₦{total.toFixed(2)}</span>
                 </div>
                 {selectedCustomer && (
                   <div className="flex justify-between text-[10px] text-violet-400 mt-1">
@@ -650,11 +803,11 @@ export function POSTerminalScreen() {
           <div className="flex-1 flex flex-col p-3.5 gap-2.5 overflow-y-auto">
             <div className="bg-[var(--surface-2)] border border-[var(--border)] rounded-xl p-3 text-center">
               <div className="text-[10px] text-subtle font-bold uppercase tracking-widest mb-0.5">Amount Due</div>
-              <div className="text-[30px] font-extrabold text-[var(--text)] tabular-nums">${total.toFixed(2)}</div>
+              <div className="text-[30px] font-extrabold text-[var(--text)] tabular-nums">₦{total.toFixed(2)}</div>
             </div>
             <div className="bg-emerald-500/15 border border-emerald-500/30 rounded-xl p-2.5 text-center">
               <div className="text-[10px] text-emerald-400 font-bold uppercase tracking-widest mb-0.5">Cash Received</div>
-              <div className="text-[26px] font-extrabold text-emerald-400 tabular-nums min-h-[34px]">${cashInput || '0'}</div>
+              <div className="text-[26px] font-extrabold text-emerald-400 tabular-nums min-h-[34px]">₦{cashInput || '0'}</div>
             </div>
             {cashNum > 0 && (
               <div className={`rounded-xl p-2.5 text-center border ${change >= 0 ? 'bg-emerald-500/15 border-emerald-500/30' : 'bg-red-500/15 border-red-500/30'}`}>
@@ -662,14 +815,14 @@ export function POSTerminalScreen() {
                   {change >= 0 ? 'Change Due' : 'Insufficient'}
                 </div>
                 <div className={`text-[22px] font-extrabold tabular-nums ${change >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-                  ${Math.abs(change).toFixed(2)}
+                  ₦{Math.abs(change).toFixed(2)}
                 </div>
               </div>
             )}
             <div className="grid grid-cols-3 gap-1.5">
               {['20', '50', '100'].map(v => (
                 <button key={v} onClick={() => setCashInput(v)} className="h-9 bg-[var(--surface-2)] border border-[var(--border-strong)] text-muted hover:bg-[var(--input-bg)] hover:text-[var(--text)] rounded-lg text-[13px] font-semibold transition-all">
-                  ${v}
+                  ₦{v}
                 </button>
               ))}
             </div>
@@ -703,7 +856,7 @@ export function POSTerminalScreen() {
           <div className="flex-1 flex flex-col p-3.5 gap-4">
             <div className="bg-[var(--surface-2)] border border-[var(--border)] rounded-xl p-3 text-center">
               <div className="text-[10px] text-subtle font-bold uppercase tracking-widest mb-0.5">Amount Due</div>
-              <div className="text-[30px] font-extrabold text-[var(--text)] tabular-nums">${total.toFixed(2)}</div>
+              <div className="text-[30px] font-extrabold text-[var(--text)] tabular-nums">₦{total.toFixed(2)}</div>
             </div>
             
             <div>
@@ -753,25 +906,36 @@ export function POSTerminalScreen() {
           <div className="flex-1 flex flex-col p-3.5 gap-4">
             <div className="bg-[var(--surface-2)] border border-[var(--border)] rounded-xl p-3 text-center">
               <div className="text-[10px] text-subtle font-bold uppercase tracking-widest mb-0.5">Amount Due</div>
-              <div className="text-[30px] font-extrabold text-[var(--text)] tabular-nums">${total.toFixed(2)}</div>
+              <div className="text-[30px] font-extrabold text-[var(--text)] tabular-nums">₦{total.toFixed(2)}</div>
             </div>
             
             <div>
               <div className="text-[10px] font-bold uppercase tracking-widest text-subtle mb-2">Select POS Machine</div>
               <div className="grid grid-cols-2 gap-2">
-                {POS_MACHINES.filter(m => payConfig?.pos[m.id === 'gtb_pos' ? 'gtb' : 'firstbank'] ?? true).map(pos => (
-                  <button
-                    key={pos.id}
-                    onClick={() => setSelectedPOS(pos.id)}
-                    className={`h-16 flex flex-col items-center justify-center gap-2 rounded-xl border transition-all ${
-                      selectedPOS === pos.id
-                        ? 'bg-amber-500/15 border-amber-500/50 text-amber-400'
-                        : 'bg-[var(--surface-2)] border-[var(--border-strong)] text-muted hover:border-[var(--border-strong)]'
-                    }`}
-                  >
-                    <span className="text-2xl">💳</span>
-                    <span className="text-[11px] font-bold">{posLabels[pos.id]}</span>
-                  </button>
+                {(payConfig?.pos?.terminals?.filter((t) => t.enabled) ?? POS_MACHINES.map((m) => ({ id: m.id, name: m.name, enabled: true, type: 'other' }))).map((pos) => (
+                  <div key={pos.id} className="relative">
+                    <button
+                      onClick={() => setSelectedPOS(pos.id)}
+                      className={`w-full h-16 flex flex-col items-center justify-center gap-2 rounded-xl border transition-all ${
+                        selectedPOS === pos.id
+                          ? 'bg-amber-500/15 border-amber-500/50 text-amber-400'
+                          : 'bg-[var(--surface-2)] border-[var(--border-strong)] text-muted hover:border-[var(--border-strong)]'
+                      }`}
+                    >
+                      <span className="text-2xl">💳</span>
+                      <span className="text-[11px] font-bold truncate max-w-full px-2">{pos.name || posLabels[pos.id as keyof typeof posLabels] || pos.id}</span>
+                    </button>
+                    {payConfig && (
+                      <button
+                        type="button"
+                        onClick={() => removePosMachine(pos.id)}
+                        title="Remove this POS machine"
+                        className="absolute top-1 right-1 w-5 h-5 flex items-center justify-center rounded-md text-subtle hover:text-red-400 hover:bg-red-500/10 transition-all"
+                      >
+                        <IconX size={11} />
+                      </button>
+                    )}
+                  </div>
                 ))}
               </div>
             </div>
@@ -781,7 +945,9 @@ export function POSTerminalScreen() {
                 <IconCreditCard size={24} />
               </div>
               <div className="text-[13px] font-bold text-[var(--text)]">
-                {selectedPOS ? posLabels[selectedPOS] : 'Select POS Machine'}
+                {selectedPOS
+                  ? (payConfig?.pos?.terminals?.find((t) => t.id === selectedPOS)?.name || posLabels[selectedPOS as keyof typeof posLabels] || selectedPOS)
+                  : 'Select POS Machine'}
               </div>
               <div className="text-xs text-subtle">
                 {selectedPOS ? 'Ready to process card payment' : 'Choose a POS machine above'}
@@ -804,16 +970,16 @@ export function POSTerminalScreen() {
             <div className="bg-[var(--surface-2)] border border-[var(--border)] rounded-xl p-3">
               <div className="flex justify-between items-center mb-2">
                 <span className="text-[10px] text-subtle font-bold uppercase tracking-widest">Total Due</span>
-                <span className="text-[18px] font-extrabold text-[var(--text)] tabular-nums">${total.toFixed(2)}</span>
+                <span className="text-[18px] font-extrabold text-[var(--text)] tabular-nums">₦{total.toFixed(2)}</span>
               </div>
               <div className="flex justify-between items-center mb-2">
                 <span className="text-[10px] text-emerald-400 font-bold uppercase tracking-widest">Paid</span>
-                <span className="text-[14px] font-extrabold text-emerald-400 tabular-nums">${splitTotalPaid.toFixed(2)}</span>
+                <span className="text-[14px] font-extrabold text-emerald-400 tabular-nums">₦{splitTotalPaid.toFixed(2)}</span>
               </div>
               <div className="flex justify-between items-center">
                 <span className="text-[10px] text-amber-400 font-bold uppercase tracking-widest">Remaining</span>
                 <span className={`text-[16px] font-extrabold tabular-nums ${splitRemaining > 0 ? 'text-amber-400' : 'text-emerald-400'}`}>
-                  ${Math.abs(splitRemaining).toFixed(2)}
+                  ₦{Math.abs(splitRemaining).toFixed(2)}
                 </span>
               </div>
             </div>
@@ -837,7 +1003,7 @@ export function POSTerminalScreen() {
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
-                      <span className="text-[13px] font-extrabold text-emerald-400">${payment.amount.toFixed(2)}</span>
+                      <span className="text-[13px] font-extrabold text-emerald-400">₦{payment.amount.toFixed(2)}</span>
                       <button
                         onClick={() => removeSplitPayment(payment.id)}
                         className="w-5 h-5 rounded flex items-center justify-center text-subtle hover:text-red-400 transition-all"
@@ -889,7 +1055,7 @@ export function POSTerminalScreen() {
                   <>
                     <div className="bg-emerald-500/15 border border-emerald-500/30 rounded-xl p-2.5 text-center">
                       <div className="text-[10px] text-emerald-400 font-bold uppercase tracking-widest mb-0.5">Enter Cash Amount</div>
-                      <div className="text-[22px] font-extrabold text-emerald-400 tabular-nums min-h-[28px]">${splitCashInput || '0'}</div>
+                      <div className="text-[22px] font-extrabold text-emerald-400 tabular-nums min-h-[28px]">₦{splitCashInput || '0'}</div>
                     </div>
 
                     <div className="grid grid-cols-4 gap-1">
@@ -933,7 +1099,7 @@ export function POSTerminalScreen() {
                     >
                       <span className="text-2xl">🏦</span>
                       <span className="text-[11px] font-bold text-[var(--text)]">GTBank</span>
-                      <span className="text-[10px] font-bold text-blue-400">${splitRemaining.toFixed(2)}</span>
+                      <span className="text-[10px] font-bold text-blue-400">₦{splitRemaining.toFixed(2)}</span>
                     </button>
                     <button
                       onClick={() => addSplitPayment('transfer', splitRemaining, 'firstbank')}
@@ -941,7 +1107,7 @@ export function POSTerminalScreen() {
                     >
                       <span className="text-2xl">🏦</span>
                       <span className="text-[11px] font-bold text-[var(--text)]">FirstBank</span>
-                      <span className="text-[10px] font-bold text-blue-400">${splitRemaining.toFixed(2)}</span>
+                      <span className="text-[10px] font-bold text-blue-400">₦{splitRemaining.toFixed(2)}</span>
                     </button>
                   </div>
                 )}
@@ -954,7 +1120,7 @@ export function POSTerminalScreen() {
                     >
                       <span className="text-2xl">💳</span>
                       <span className="text-[11px] font-bold text-[var(--text)]">GTBank POS</span>
-                      <span className="text-[10px] font-bold text-amber-400">${splitRemaining.toFixed(2)}</span>
+                      <span className="text-[10px] font-bold text-amber-400">₦{splitRemaining.toFixed(2)}</span>
                     </button>
                     <button
                       onClick={() => addSplitPayment('pos', splitRemaining, undefined, 'firstbank_pos')}
@@ -962,7 +1128,7 @@ export function POSTerminalScreen() {
                     >
                       <span className="text-2xl">💳</span>
                       <span className="text-[11px] font-bold text-[var(--text)]">FirstBank POS</span>
-                      <span className="text-[10px] font-bold text-amber-400">${splitRemaining.toFixed(2)}</span>
+                      <span className="text-[10px] font-bold text-amber-400">₦{splitRemaining.toFixed(2)}</span>
                     </button>
                   </div>
                 )}
@@ -1013,6 +1179,10 @@ export function POSTerminalScreen() {
         total={total}
         tax={tax}
         subtotal={subtotal}
+        discount={discountAmount}
+        discountRate={discountEnabled ? discountRate : 0}
+        taxRate={taxRate}
+        taxIncluded={taxIncluded}
         paymentMethod={completedSaleData?.paymentMethod || ''}
         staffName={completedSaleData?.staffName || ''}
         orderNumber={completedSaleData?.orderNumber}

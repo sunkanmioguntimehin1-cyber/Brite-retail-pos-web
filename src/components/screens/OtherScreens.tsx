@@ -315,8 +315,9 @@
 "use client";
 import { useState, useEffect } from "react";
 import { PaymentMethodSettings } from "@/components/settings/PaymentMethodSettings";
-import { useStaff, useStore, useUpdateStore } from "@/lib/hooks";
+import { useStaff, useStore, useUpdateStore, useSetMyPin, useChangeMyPassword } from "@/lib/hooks";
 import { useCan } from "@/lib/auth/can";
+import { useAuthStore } from "@/store/authStore";
 import { Skeleton } from "@/components/ui/Skeleton";
 
 // Note: CustomersScreen has been REMOVED from this file.
@@ -403,6 +404,240 @@ export function ReportsScreen() {
   );
 }
 
+function SecuritySettings() {
+  const user = useAuthStore((state) => state.user);
+  const setMyPin = useSetMyPin();
+  const changeMyPassword = useChangeMyPassword();
+  const [currentPin, setCurrentPin] = useState("");
+  const [newPin, setNewPin] = useState("");
+  const [confirmPin, setConfirmPin] = useState("");
+  const [pinError, setPinError] = useState("");
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [passwordError, setPasswordError] = useState("");
+  const hasPin = user?.hasPin === true;
+
+  const inputCls = "w-full h-9 px-3 rounded-lg text-[13px] outline-none transition-all";
+  const pinInputCls = `${inputCls} tracking-widest`;
+  const inputStyle = {
+    backgroundColor: "var(--color-input-bg)",
+    border: "1px solid var(--color-border)",
+    color: "var(--color-text)",
+  };
+  const labelCls = "block text-[10px] font-bold uppercase tracking-widest mb-1.5";
+  const labelStyle = { color: "var(--color-text-subtle)" };
+  const hintCls = "rounded-lg p-3 mb-5 text-[11px] border max-w-sm";
+  const hintStyle = {
+    color: "var(--color-text-muted)",
+    backgroundColor: "var(--color-surface)",
+    borderColor: "var(--color-border)",
+  };
+  const saveBtnCls =
+    "h-9 px-4 text-white rounded-lg text-[13px] font-semibold shadow-[0_2px_8px_rgba(59,130,246,0.3)] disabled:opacity-40 disabled:cursor-not-allowed";
+  const saveBtnStyle = (pending: boolean) => ({
+    backgroundColor: pending ? "var(--color-primary)80" : "var(--color-primary)",
+  });
+  const errorOf = (err: unknown, fallback: string) =>
+    (err as { response?: { data?: { error?: string } } })?.response?.data?.error ?? fallback;
+  const digitsOnly = (value: string) => value.replace(/\D/g, "").slice(0, 6);
+
+  const handleSavePassword = async () => {
+    setPasswordError("");
+    if (newPassword.length < 6) {
+      setPasswordError("New password must be at least 6 characters");
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setPasswordError("Passwords do not match");
+      return;
+    }
+    if (!currentPassword) {
+      setPasswordError("Enter your current password");
+      return;
+    }
+    try {
+      await changeMyPassword.mutateAsync({ currentPassword, newPassword });
+      setCurrentPassword("");
+      setNewPassword("");
+      setConfirmPassword("");
+    } catch (err) {
+      setPasswordError(errorOf(err, "Failed to update password"));
+    }
+  };
+
+  const handleSavePin = async () => {
+    setPinError("");
+    if (!/^\d{4,6}$/.test(newPin)) {
+      setPinError("New passcode must be 4 to 6 digits");
+      return;
+    }
+    if (newPin !== confirmPin) {
+      setPinError("Passcodes do not match");
+      return;
+    }
+    if (hasPin && !currentPin) {
+      setPinError("Enter your current passcode");
+      return;
+    }
+    try {
+      await setMyPin.mutateAsync({ pin: newPin, currentPin: hasPin ? currentPin : undefined });
+      setCurrentPin("");
+      setNewPin("");
+      setConfirmPin("");
+    } catch (err) {
+      setPinError(errorOf(err, "Failed to update passcode"));
+    }
+  };
+
+  return (
+    <>
+      <div className="font-extrabold text-base mb-0.5" style={{ color: "var(--color-text)" }}>
+        Security
+      </div>
+      <div className="text-xs mb-5" style={{ color: "var(--color-text-muted)" }}>
+        Manage your login password and the passcode used to verify sales at the POS
+      </div>
+
+      <div className="font-bold text-[13px] mb-3" style={{ color: "var(--color-text)" }}>
+        Login Password
+      </div>
+      <div className="grid grid-cols-1 gap-3.5 mb-5 max-w-sm">
+        <div>
+          <label className={labelCls} style={labelStyle}>
+            Current Password
+          </label>
+          <input
+            type="password"
+            autoComplete="current-password"
+            value={currentPassword}
+            onChange={(e) => setCurrentPassword(e.target.value)}
+            className={inputCls}
+            style={inputStyle}
+          />
+        </div>
+        <div>
+          <label className={labelCls} style={labelStyle}>
+            New Password
+          </label>
+          <input
+            type="password"
+            autoComplete="new-password"
+            value={newPassword}
+            onChange={(e) => setNewPassword(e.target.value)}
+            placeholder="At least 6 characters"
+            className={inputCls}
+            style={inputStyle}
+          />
+        </div>
+        <div>
+          <label className={labelCls} style={labelStyle}>
+            Confirm New Password
+          </label>
+          <input
+            type="password"
+            autoComplete="new-password"
+            value={confirmPassword}
+            onChange={(e) => setConfirmPassword(e.target.value)}
+            placeholder="Re-enter new password"
+            className={inputCls}
+            style={inputStyle}
+          />
+        </div>
+      </div>
+      <div className={hintCls} style={hintStyle}>
+        This is the password you use to sign in. You&apos;ll keep using it until
+        you change it again.
+      </div>
+      {passwordError && (
+        <div className="text-[12px] text-red-400 font-medium mb-4">{passwordError}</div>
+      )}
+      <div
+        className="pt-4 border-b pb-6 mb-6 flex justify-end"
+        style={{ borderColor: "var(--color-border)" }}
+      >
+        <button
+          onClick={handleSavePassword}
+          disabled={changeMyPassword.isPending}
+          className={saveBtnCls}
+          style={saveBtnStyle(changeMyPassword.isPending)}
+        >
+          {changeMyPassword.isPending ? "Saving..." : "Update Password"}
+        </button>
+      </div>
+
+      <div className="font-bold text-[13px] mb-3" style={{ color: "var(--color-text)" }}>
+        POS Passcode
+      </div>
+      <div className="grid grid-cols-1 gap-3.5 mb-5 max-w-sm">
+        {hasPin && (
+          <div>
+            <label className={labelCls} style={labelStyle}>
+              Current Passcode
+            </label>
+            <input
+              type="password"
+              inputMode="numeric"
+              autoComplete="off"
+              value={currentPin}
+              onChange={(e) => setCurrentPin(digitsOnly(e.target.value))}
+              className={pinInputCls}
+              style={inputStyle}
+            />
+          </div>
+        )}
+        <div>
+          <label className={labelCls} style={labelStyle}>
+            {hasPin ? "New Passcode" : "Create Passcode"}
+          </label>
+          <input
+            type="password"
+            inputMode="numeric"
+            autoComplete="off"
+            value={newPin}
+            onChange={(e) => setNewPin(digitsOnly(e.target.value))}
+            placeholder="4 to 6 digits"
+            className={pinInputCls}
+            style={inputStyle}
+          />
+        </div>
+        <div>
+          <label className={labelCls} style={labelStyle}>
+            Confirm Passcode
+          </label>
+          <input
+            type="password"
+            inputMode="numeric"
+            autoComplete="off"
+            value={confirmPin}
+            onChange={(e) => setConfirmPin(digitsOnly(e.target.value))}
+            placeholder="Re-enter passcode"
+            className={pinInputCls}
+            style={inputStyle}
+          />
+        </div>
+      </div>
+      <div className={hintCls} style={hintStyle}>
+        This passcode is personal to you and required to complete a sale at the
+        POS. Choose 4 to 6 digits you will remember.
+      </div>
+      {pinError && (
+        <div className="text-[12px] text-red-400 font-medium mb-4">{pinError}</div>
+      )}
+      <div className="pt-4 border-t flex justify-end" style={{ borderColor: "var(--color-border)" }}>
+        <button
+          onClick={handleSavePin}
+          disabled={setMyPin.isPending}
+          className={saveBtnCls}
+          style={saveBtnStyle(setMyPin.isPending)}
+        >
+          {setMyPin.isPending ? "Saving..." : hasPin ? "Update Passcode" : "Create Passcode"}
+        </button>
+      </div>
+    </>
+  );
+}
+
 export function SettingsScreen() {
   const [activeTab, setActiveTab] = useState("store");
   const { data: store, isLoading: storeLoading } = useStore();
@@ -413,11 +648,40 @@ export function SettingsScreen() {
   // The old useEffect-to-setState pair caused an extra render on every load.
   const [storeNameOverride, setStoreNameOverride] = useState<string | null>(null);
   const [storeDescOverride, setStoreDescOverride] = useState<string | null>(null);
+  const [taxRateOverride, setTaxRateOverride] = useState<number | string | null>(null);
+  const [taxNumberOverride, setTaxNumberOverride] = useState<string | null>(null);
+  const [taxIncludedOverride, setTaxIncludedOverride] = useState<boolean | null>(null);
+  const [discountRateOverride, setDiscountRateOverride] = useState<number | string | null>(null);
   const storeName = storeNameOverride ?? store?.name ?? "";
   const storeDesc = storeDescOverride ?? store?.description ?? "";
+  const taxRate = taxRateOverride ?? store?.settings?.tax?.rate ?? 8.25;
+  const taxNumber = taxNumberOverride ?? store?.settings?.tax?.number ?? "";
+  const taxIncludedInPrice =
+    taxIncludedOverride ?? store?.settings?.tax?.includedInPrice ?? false;
+  const discountRate = discountRateOverride ?? store?.settings?.discount?.rate ?? 0;
 
   const handleSaveStore = () => {
-    updateStore.mutate({ name: storeName, description: storeDesc });
+    updateStore.mutate({
+      name: storeName,
+      description: storeDesc,
+      settings: {
+        ...store?.settings,
+        tax: {
+          rate: Number(taxRate) || 0,
+          number: String(taxNumber ?? ''),
+          includedInPrice: Boolean(taxIncludedInPrice),
+        },
+      },
+    });
+  };
+
+  const handleSaveDiscount = () => {
+    updateStore.mutate({
+      settings: {
+        ...store?.settings,
+        discount: { rate: Number(discountRate) || 0 },
+      },
+    });
   };
 
   const inputCls =
@@ -432,10 +696,12 @@ export function SettingsScreen() {
   const tabs = [
     { id: "store", label: "Store Info" },
     { id: "tax", label: "Tax Settings" },
+    { id: "discount", label: "Discount" },
     { id: "payment", label: "Payment Methods" },
     { id: "receipts", label: "Receipts" },
     { id: "integrations", label: "Integrations" },
     { id: "backup", label: "Backup & Export" },
+    { id: "security", label: "Security" },
   ];
 
   return (
@@ -538,7 +804,7 @@ export function SettingsScreen() {
                     </label>
                     <select className={inputCls} style={selectStyle}>
                       <option>EUR (€)</option>
-                      <option>USD ($)</option>
+                      <option>USD</option>
                       <option>GBP (£)</option>
                     </select>
                   </div>
@@ -590,7 +856,11 @@ export function SettingsScreen() {
                 </label>
                 <input
                   type="number"
-                  defaultValue="21"
+                  value={taxRate}
+                  onChange={(e) => setTaxRateOverride(e.target.value === '' ? '' : parseFloat(e.target.value))}
+                  step="0.01"
+                  min="0"
+                  max="100"
                   className={inputCls}
                   style={inputStyle}
                 />
@@ -604,7 +874,8 @@ export function SettingsScreen() {
                 </label>
                 <input
                   type="text"
-                  defaultValue="NL123456789B01"
+                  value={taxNumber}
+                  onChange={(e) => setTaxNumberOverride(e.target.value)}
                   className={inputCls}
                   style={inputStyle}
                 />
@@ -616,9 +887,14 @@ export function SettingsScreen() {
                 >
                   Tax Included in Price
                 </label>
-                <select className={inputCls} style={selectStyle}>
-                  <option>Yes</option>
-                  <option>No</option>
+                <select
+                  value={taxIncludedInPrice ? 'Yes' : 'No'}
+                  onChange={(e) => setTaxIncludedOverride(e.target.value === 'Yes')}
+                  className={inputCls}
+                  style={selectStyle}
+                >
+                  <option value="Yes">Yes</option>
+                  <option value="No">No</option>
                 </select>
               </div>
             </div>
@@ -627,10 +903,84 @@ export function SettingsScreen() {
               style={{ borderColor: "var(--color-border)" }}
             >
               <button
-                className="h-9 px-4 text-white rounded-lg text-[13px] font-semibold shadow-[0_2px_8px_rgba(59,130,246,0.3)]"
-                style={{ backgroundColor: "var(--color-primary)" }}
+                onClick={handleSaveStore}
+                disabled={updateStore.isPending || !canManageSettings}
+                className="h-9 px-4 text-white rounded-lg text-[13px] font-semibold shadow-[0_2px_8px_rgba(59,130,246,0.3)] disabled:opacity-40 disabled:cursor-not-allowed"
+                style={{
+                  backgroundColor: updateStore.isPending
+                    ? "var(--color-primary)80"
+                    : "var(--color-primary)",
+                }}
+                title={canManageSettings ? undefined : "Your role doesn't include permission to edit store settings"}
               >
-                Save Changes
+                {updateStore.isPending ? "Saving..." : "Save Changes"}
+              </button>
+            </div>
+          </>
+        )}
+
+        {activeTab === "discount" && (
+          <>
+            <div
+              className="font-extrabold text-base mb-0.5"
+              style={{ color: "var(--color-text)" }}
+            >
+              Discount Settings
+            </div>
+            <div
+              className="text-xs mb-5"
+              style={{ color: "var(--color-text-muted)" }}
+            >
+              Set the store-wide discount cashiers can apply to a sale at checkout
+            </div>
+            <div className="grid grid-cols-2 gap-3.5 mb-5">
+              <div>
+                <label
+                  className="block text-[10px] font-bold uppercase tracking-widest mb-1.5"
+                  style={{ color: "var(--color-text-subtle)" }}
+                >
+                  Discount Rate (%)
+                </label>
+                <input
+                  type="number"
+                  value={discountRate}
+                  onChange={(e) => setDiscountRateOverride(e.target.value === '' ? '' : parseFloat(e.target.value))}
+                  step="0.01"
+                  min="0"
+                  max="100"
+                  className={inputCls}
+                  style={inputStyle}
+                />
+              </div>
+            </div>
+            <div
+              className="rounded-lg p-3 mb-5 text-[11px] border"
+              style={{
+                color: "var(--color-text-muted)",
+                backgroundColor: "var(--color-surface)",
+                borderColor: "var(--color-border)",
+              }}
+            >
+              Set to 0 to turn discounts off. When set, the checkout shows a
+              discount toggle that applies this percentage to the tax-inclusive
+              total.
+            </div>
+            <div
+              className="pt-4 border-t flex justify-end"
+              style={{ borderColor: "var(--color-border)" }}
+            >
+              <button
+                onClick={handleSaveDiscount}
+                disabled={updateStore.isPending || !canManageSettings}
+                className="h-9 px-4 text-white rounded-lg text-[13px] font-semibold shadow-[0_2px_8px_rgba(59,130,246,0.3)] disabled:opacity-40 disabled:cursor-not-allowed"
+                style={{
+                  backgroundColor: updateStore.isPending
+                    ? "var(--color-primary)80"
+                    : "var(--color-primary)",
+                }}
+                title={canManageSettings ? undefined : "Your role doesn't include permission to edit store settings"}
+              >
+                {updateStore.isPending ? "Saving..." : "Save Changes"}
               </button>
             </div>
           </>
@@ -839,6 +1189,8 @@ export function SettingsScreen() {
             </div>
           </>
         )}
+
+        {activeTab === "security" && <SecuritySettings />}
       </div>
     </div>
   );

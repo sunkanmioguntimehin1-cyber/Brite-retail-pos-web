@@ -8,8 +8,13 @@ import { Product, getProductCategoryId } from '@/lib/api/products';
 interface EditProductFormData {
   productCode: string;
   name: string;
+  description: string;
+  size: string;
+  colour: string;
   sellingPrice: number;
-  cost: number;
+  cost?: number;
+  overheadCost?: number;
+  operatingCost?: number;
   stock: number;
   categoryId?: string;
   isActive?: boolean;
@@ -20,6 +25,8 @@ interface EditProductModalProps {
   isOpen: boolean;
   onClose: () => void;
   product: Product | null;
+  /** Whether the user may view/edit cost, overhead and operating costs. */
+  canViewCost?: boolean;
   onUpdate: (productId: string, productData: EditProductFormData) => void;
 }
 
@@ -28,10 +35,16 @@ const defaultFormData: ProductFormData = {
   productCode: '',
   name: '',
   category: '',
+  description: '',
+  size: '',
+  colour: '',
   sellingPrice: '',
   cost: '',
+  overheadCost: '',
+  operatingCost: '',
   stock: '',
   status: 'active',
+  taxable: true,
   image: null,
 };
 
@@ -41,7 +54,7 @@ const generateProductCode = (): string => {
   return `PRD-${timestamp}-${random}`;
 };
 
-export function EditProductModal({ isOpen, onClose, product, onUpdate }: EditProductModalProps) {
+export function EditProductModal({ isOpen, onClose, product, canViewCost = true, onUpdate }: EditProductModalProps) {
   const [imagePreview, setImagePreview] = useState<string | null>(null);
   
   const {
@@ -71,12 +84,18 @@ export function EditProductModal({ isOpen, onClose, product, onUpdate }: EditPro
         productCode: product.sku || '',
         name: product.name,
         category: getProductCategoryId(product) || '',
+        description: product.description || '',
+        size: product.size || '',
+        colour: product.colour || '',
         sellingPrice: product.price.toString(),
         cost: (product.costPrice || 0).toString(),
+        overheadCost: (product.overheadCost || 0).toString(),
+        operatingCost: (product.operatingCost || 0).toString(),
         stock: product.stock.toString(),
         // Reflect the stored flag; hardcoding 'active' re-enabled archived
         // products the moment anyone edited an unrelated field.
         status: product.isActive === false ? 'inactive' : 'active',
+        taxable: product.taxable ?? true,
         image: null,
       });
       setImagePreview(product.image || null);
@@ -94,7 +113,7 @@ export function EditProductModal({ isOpen, onClose, product, onUpdate }: EditPro
       setError('sellingPrice', { type: 'manual', message: 'Valid selling price is required' });
       hasErrors = true;
     }
-    if (!data.cost || parseFloat(data.cost) < 0) {
+    if (canViewCost && (!data.cost || parseFloat(data.cost) < 0)) {
       setError('cost', { type: 'manual', message: 'Valid cost is required' });
       hasErrors = true;
     }
@@ -112,13 +131,20 @@ export function EditProductModal({ isOpen, onClose, product, onUpdate }: EditPro
     const sellingPrice = parseFloat(formData.sellingPrice);
     const cost = parseFloat(formData.cost);
     const stock = parseInt(formData.stock);
+    const overheadCost = parseFloat(formData.overheadCost);
+    const operatingCost = parseFloat(formData.operatingCost);
 
     onUpdate(product.id, {
       // Reuse the code shown in the form rather than generating a second one.
       productCode: formData.productCode.trim() || generateProductCode(),
       name: formData.name,
+      description: formData.description.trim(),
+      size: formData.size.trim(),
+      colour: formData.colour.trim(),
       sellingPrice,
-      cost,
+      cost: canViewCost ? cost : undefined,
+      overheadCost: canViewCost && !Number.isNaN(overheadCost) ? overheadCost : undefined,
+      operatingCost: canViewCost && !Number.isNaN(operatingCost) ? operatingCost : undefined,
       stock,
       categoryId: formData.category || undefined,
       isActive: formData.status !== 'inactive',
@@ -164,6 +190,8 @@ export function EditProductModal({ isOpen, onClose, product, onUpdate }: EditPro
           imagePreview={imagePreview}
           setImagePreview={setImagePreview}
           isEdit
+          canViewCost={canViewCost}
+          barcode={product.barcode}
         />
       )}
     </Modal>
