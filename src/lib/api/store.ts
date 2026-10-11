@@ -1,9 +1,34 @@
 import api from './axios';
 
+export interface POSTerminal {
+  id: string;
+  name: string;
+  enabled: boolean;
+  type: 'gtb' | 'firstbank' | 'other';
+}
+
+export interface POSConfig {
+  enabled: boolean;
+  gtb?: boolean;
+  firstbank?: boolean;
+  terminals: POSTerminal[];
+}
+
 export interface PaymentMethodConfig {
   cash: boolean;
   transfer: { enabled: boolean; gtb: boolean; firstbank: boolean };
-  pos: { enabled: boolean; gtb: boolean; firstbank: boolean };
+  pos: POSConfig;
+}
+
+export interface StoreTaxConfig {
+  rate: number;
+  number: string;
+  includedInPrice: boolean;
+}
+
+/** Store-wide discount the till may apply. `rate` is a percentage. */
+export interface StoreDiscountConfig {
+  rate: number;
 }
 
 export interface Store {
@@ -15,6 +40,8 @@ export interface Store {
     primaryColor: string;
     accentColor: string;
     theme: 'dark' | 'light' | 'gold';
+    tax?: StoreTaxConfig;
+    discount?: StoreDiscountConfig;
     paymentMethods: PaymentMethodConfig;
   };
   createdAt: string;
